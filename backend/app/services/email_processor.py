@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 
 from ..gmail_service import get_gmail_service, fetch_emails, email_to_parts
 from ..email_classifier import classify_email, extract_company_name
-from ..models import Application, EmailLog
+from ..models import Application, EmailLog, SyncMetadata
+
+LAST_SYNCED_AT_KEY = "last_synced_at"
 
 
 def run_sync(db: Session, on_progress: Optional[Callable[[int, int, str], None]] = None) -> dict:
@@ -23,7 +25,20 @@ def run_sync(db: Session, on_progress: Optional[Callable[[int, int, str], None]]
     except Exception as e:
         return {"error": str(e), "processed": 0, "created": 0, "skipped": 0, "errors": 0}
 
-    after_date = (datetime.utcnow() - timedelta(days=90)).strftime("%Y/%m/%d")
+    # Only fetch emails after last successful sync (or 90 days back on first run)
+    default_after = datetime.utcnow() - timedelta(days=90)
+    row = db.query(SyncMetadata).filter(SyncMetadata.key == LAST_SYNCED_AT_KEY).first()
+    if row and row.value:
+        try:
+            last_synced = datetime.fromisoformat(row.value.replace("Z", "+00:00"))
+            if last_synced.tzinfo:
+                last_synced = last_synced.replace(tzinfo=None)
+            after_date = last_synced.strftime("%Y/%m/%d")
+        except Exception:
+            after_date = default_after.strftime("%Y/%m/%d")
+    else:
+        after_date = default_after.strftime("%Y/%m/%d")
+
     queries = [
         f"after:{after_date} subject:(application OR interview OR assessment OR position)",
         f"after:{after_date} from:(noreply OR no-reply OR careers OR recruiting OR talent)",
@@ -106,6 +121,16 @@ def run_sync(db: Session, on_progress: Optional[Callable[[int, int, str], None]]
         created += 1
         if on_progress:
             on_progress(i + 1, total, "Classifying…")
+
+    # Persist last sync time so next run only fetches newer emails
+    now = datetime.utcnow()
+    row = db.query(SyncMetadata).filter(SyncMetadata.key == LAST_SYNCED_AT_KEY).first()
+    if row:
+        row.value = now.isoformat()
+        row.updated_at = now
+    else:
+        db.add(SyncMetadata(key=LAST_SYNCED_AT_KEY, value=now.isoformat()))
+    db.commit()
 
     return {
         "processed": len(all_emails),

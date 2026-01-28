@@ -31,3 +31,12 @@ class EmailLog(Base):
     processed_at = Column(DateTime, default=datetime.utcnow)
     classification = Column(String, nullable=True)
     error = Column(Text, nullable=True)
+
+
+class SyncMetadata(Base):
+    """Key-value store for sync state (e.g. last_synced_at)."""
+    __tablename__ = "sync_metadata"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
