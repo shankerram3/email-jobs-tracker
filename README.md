@@ -292,6 +292,8 @@ pytest
 
 - **DB:** Run `alembic upgrade head` to apply migrations. New columns on `applications` are nullable; new tables (`sync_state`, `companies`, `classification_cache`) are created by migrations.
 - **Secrets:** Keep all sensitive config in `backend/.env`. Do **not** commit `.env` or `credentials.json` (add them to `.gitignore`).
+- **OAuth CSRF:** When `GMAIL_OAUTH_REDIRECT_URI` is set, the Gmail OAuth flow uses a cryptographically random `state` parameter, stores it server-side, and validates it on callback to mitigate CSRF. Without that redirect URI, the local `run_local_server` flow does not use state.
+- **Token storage:** JWTs are typically stored in the frontend (e.g. localStorage). This is convenient but increases exposure if XSS occurs; consider HTTP-only cookies or stronger CSP/sanitization for production. Gmail OAuth tokens are written to `token.pickle` with file mode `0o600`; the file is unencrypted—for production, consider encrypting at rest or using a secrets manager.
 
 ---
 

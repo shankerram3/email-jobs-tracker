@@ -121,6 +121,10 @@ def finish_gmail_oauth(code: str, state: str) -> str:
     creds = flow.credentials
     with open(token_path, "wb") as token:
         pickle.dump(creds, token)
+    try:
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
     return redirect_url
 
 
@@ -162,6 +166,10 @@ def get_gmail_service(allow_interactive_oauth: bool = False):
             creds = flow.run_local_server(port=0)
         with open(token_path, "wb") as token:
             pickle.dump(creds, token)
+        try:
+            os.chmod(token_path, 0o600)
+        except OSError:
+            pass
 
     return build("gmail", "v1", credentials=creds)
 

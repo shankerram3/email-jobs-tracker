@@ -39,6 +39,21 @@ def set_last_history_id(db: Session, history_id: str, user_id: Optional[int] = N
     db.commit()
 
 
+def set_last_full_sync_at(db: Session, user_id: Optional[int] = None):
+    """Update per-user SyncState with last_full_sync_at (for full-sync window)."""
+    if user_id is None:
+        return
+    row = get_sync_state(db, user_id)
+    now = datetime.utcnow()
+    if row:
+        row.last_full_sync_at = now
+        row.updated_at = now
+        db.commit()
+    else:
+        db.add(SyncState(user_id=user_id, last_full_sync_at=now, status="idle", updated_at=now))
+        db.commit()
+
+
 def set_sync_state_syncing(db: Session, user_id: Optional[int] = None):
     now = datetime.utcnow()
     row = get_sync_state(db, user_id)

@@ -21,6 +21,7 @@ from ..sync_state_db import (
     get_sync_state,
     get_last_history_id,
     set_last_history_id,
+    set_last_full_sync_at,
     set_memory_progress,
 )
 from .classification_service import classify_and_cache
@@ -155,15 +156,23 @@ def run_sync_with_options(
             if settings.gmail_full_sync_after_date:
                 after_date = _format_after_date(settings.gmail_full_sync_after_date)
             if not after_date and not settings.gmail_full_sync_ignore_last_synced:
-                row = db.query(SyncMetadata).filter(SyncMetadata.key == LAST_SYNCED_AT_KEY).first()
-                if row and row.value:
-                    try:
-                        last_synced = datetime.fromisoformat(row.value.replace("Z", "+00:00"))
-                        if last_synced.tzinfo:
-                            last_synced = last_synced.replace(tzinfo=None)
-                        after_date = last_synced.strftime("%Y/%m/%d")
-                    except Exception:
-                        after_date = None
+                # Per-user: use SyncState last_full_sync_at / last_synced_at; else global SyncMetadata
+                if user_id is not None:
+                    sync_row = get_sync_state(db, user_id)
+                    if sync_row:
+                        ts = sync_row.last_full_sync_at or sync_row.last_synced_at
+                        if ts:
+                            after_date = ts.strftime("%Y/%m/%d")
+                if not after_date:
+                    row = db.query(SyncMetadata).filter(SyncMetadata.key == LAST_SYNCED_AT_KEY).first()
+                    if row and row.value:
+                        try:
+                            last_synced = datetime.fromisoformat(row.value.replace("Z", "+00:00"))
+                            if last_synced.tzinfo:
+                                last_synced = last_synced.replace(tzinfo=None)
+                            after_date = last_synced.strftime("%Y/%m/%d")
+                        except Exception:
+                            after_date = None
             if not after_date:
                 after_date = _default_after_date()
 
@@ -302,6 +311,8 @@ def run_sync_with_options(
     now = datetime.utcnow()
     if new_history_id:
         set_last_history_id(db, new_history_id, user_id)
+    if full_sync and user_id is not None:
+        set_last_full_sync_at(db, user_id)
     row = db.query(SyncMetadata).filter(SyncMetadata.key == LAST_SYNCED_AT_KEY).first()
     if row:
         row.value = now.isoformat()

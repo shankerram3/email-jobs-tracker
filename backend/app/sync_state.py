@@ -83,6 +83,6 @@ def set_error(err: str, user_id: Optional[int] = None):
     with _lock:
         s = _state_by_user.get(user_id)
         if s:
-            s["status"] = "idle"
+            s["status"] = "error"
             s["error"] = err
             s["message"] = ""

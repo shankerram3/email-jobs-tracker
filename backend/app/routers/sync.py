@@ -10,6 +10,7 @@ import json
 from ..database import SessionLocal
 from ..services.email_processor import run_sync_with_options
 from ..sync_state import get_state, set_syncing, update_progress, set_idle, set_error
+from ..sync_state_db import set_sync_state_syncing, set_sync_state_idle, set_sync_state_error
 from ..auth import get_current_user_required, get_current_user_for_sse
 from ..models import User
 from ..config import settings
@@ -31,15 +32,20 @@ def _run_sync_task(mode: str, user_id: int):
             update_progress(processed, total, message, user_id)
 
         set_syncing(total=0, user_id=user_id)
+        set_sync_state_syncing(session, user_id)
         result = run_sync_with_options(session, mode=mode, on_progress=on_progress, user_id=user_id)
         if result.get("error"):
             set_error(result["error"], user_id)
+            set_sync_state_error(session, result["error"], user_id)
         else:
             set_idle(result, user_id)
+            set_sync_state_idle(session, result, user_id)
     except GmailAuthRequiredError as e:
         set_error(str(e), user_id)
+        set_sync_state_error(session, str(e), user_id)
     except Exception as e:
         set_error(str(e), user_id)
+        set_sync_state_error(session, str(e), user_id)
     finally:
         session.close()
 
