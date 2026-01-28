@@ -1,0 +1,21 @@
+# Environment and secrets
+.env
+*.pickle
+credentials.json
+
+# Python
+__pycache__/
+.venv/
+venv/
+*.pyc
+*.db
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
