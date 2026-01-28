@@ -312,6 +312,16 @@ header h1 {
   border-radius: var(--radius);
 }
 
+.sync-from-date {
+  padding: 0.5rem 0.75rem;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
 .analytics-section {
   margin-bottom: 1.5rem;
 }

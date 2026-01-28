@@ -76,6 +76,43 @@ def classify_and_cache(
     return result
 
 
+def persist_llm_result_to_cache(
+    db: Session, subject: str, sender: str, body: str, result: dict
+) -> dict:
+    """
+    Persist an LLM classification result to cache and return result with company normalized.
+    Used after parallel classify_email_llm_only calls.
+    """
+    company = normalize_company_with_db(db, result["company_name"])
+    result = {**result, "company_name": company}
+    h = content_hash(subject, sender, body)
+    raw_json = json.dumps({
+        "category": result["category"],
+        "subcategory": result.get("subcategory"),
+        "company_name": result["company_name"],
+        "job_title": result.get("job_title"),
+        "salary_min": result.get("salary_min"),
+        "salary_max": result.get("salary_max"),
+        "location": result.get("location"),
+        "confidence": result.get("confidence"),
+    })
+    row = ClassificationCache(
+        content_hash=h,
+        category=result["category"],
+        subcategory=result.get("subcategory"),
+        company_name=result["company_name"],
+        job_title=result.get("job_title"),
+        salary_min=result.get("salary_min"),
+        salary_max=result.get("salary_max"),
+        location=result.get("location"),
+        confidence=result.get("confidence"),
+        raw_json=raw_json,
+    )
+    db.add(row)
+    db.commit()
+    return result
+
+
 def normalize_company_with_db(db: Session, name: str) -> str:
     """Canonicalize company name: strip suffixes; if companies table has match, return canonical."""
     normalized = normalize_company_name(name)

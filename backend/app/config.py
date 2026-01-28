@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # If true, ignore last_synced_at when doing a full sync (use after_date/days_back)
     gmail_full_sync_ignore_last_synced: bool = False
 
+    # Classification: max concurrent LLM calls (avoids rate limits)
+    classification_max_concurrency: int = 5
+    # Batch prompt: group N emails in one LLM call (0 = disabled)
+    classification_batch_size: int = 0
+    classification_use_batch_prompt: bool = False
+
     class Config:
         env_file = ".env"
         extra = "ignore"

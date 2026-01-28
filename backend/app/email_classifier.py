@@ -2,7 +2,7 @@
 import hashlib
 import json
 import re
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from .config import settings
 
@@ -167,6 +167,111 @@ Return ONLY valid JSON, no other text."""
         "location": location,
         "confidence": confidence,
     }
+
+
+def classify_email_llm_only(subject: str, body: str, sender: str) -> dict:
+    """
+    LLM-only classification (no DB, no cache). Safe to call from worker threads.
+    Returns same structure as structured_classify_email.
+    """
+    return structured_classify_email(subject, body, sender)
+
+
+def _parse_single_result(data: dict, subject: str, body: str, sender: str) -> dict:
+    """Build one classification dict from raw LLM data + regex fallbacks."""
+    category = _normalize_category(str(data.get("category") or "OTHER"))
+    subcategory = (data.get("subcategory") or "").strip() or None
+    company_name = (data.get("company_name") or "Unknown").strip()[:255]
+    job_title = (data.get("job_title") or "").strip() or None
+    if job_title:
+        job_title = job_title[:255]
+    salary_min = data.get("salary_min")
+    if salary_min is not None and not isinstance(salary_min, (int, float)):
+        salary_min = None
+    salary_max = data.get("salary_max")
+    if salary_max is not None and not isinstance(salary_max, (int, float)):
+        salary_max = None
+    location = (data.get("location") or "").strip() or None
+    if location:
+        location = location[:255]
+    confidence = data.get("confidence")
+    if confidence is not None and isinstance(confidence, (int, float)):
+        confidence = max(0.0, min(1.0, float(confidence)))
+    else:
+        confidence = None
+    if salary_min is None and salary_max is None:
+        salary_min, salary_max = _regex_salary(body or "")
+    if not job_title:
+        job_title = _regex_job_title(subject or "", body or "")
+    return {
+        "category": category,
+        "subcategory": subcategory,
+        "company_name": company_name or "Unknown",
+        "job_title": job_title,
+        "salary_min": salary_min,
+        "salary_max": salary_max,
+        "location": location,
+        "confidence": confidence,
+    }
+
+
+def structured_classify_emails_batch(
+    emails: List[Tuple[str, str, str]],
+) -> List[dict]:
+    """
+    Classify multiple emails in one LLM call. emails = [(subject, body, sender), ...].
+    Returns list of classification dicts (same schema as structured_classify_email).
+    On parse failure or length mismatch returns empty list so caller can fall back to per-email.
+    """
+    if not emails:
+        return []
+    parts = []
+    for i, (subject, body, sender) in enumerate(emails):
+        body_sample = (body or "")[:1500]
+        parts.append(
+            f"--- Email {i + 1} ---\nSubject: {subject}\nFrom: {sender}\nBody: {body_sample}"
+        )
+    combined = "\n\n".join(parts)
+    prompt = f"""Classify each of the following job application emails and extract structured data.
+
+Return a JSON array of objects. Each object must have exactly these keys (use null for unknown):
+- category: one of REJECTION, INTERVIEW_REQUEST, ASSESSMENT, RECRUITER_OUTREACH, APPLICATION_RECEIVED, OFFER, OTHER
+- subcategory: optional string (e.g. "phone_screen", "onsite")
+- company_name: string company name or "Unknown"
+- job_title: string job title or null
+- salary_min: number or null (annual USD)
+- salary_max: number or null (annual USD)
+- location: string or null
+- confidence: number 0.0 to 1.0
+
+Emails:
+
+{combined}
+
+Return ONLY a valid JSON array of {len(emails)} objects, no other text."""
+
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=min(400 * len(emails) + 200, 4096),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```\w*\n?", "", text).replace("```", "").strip()
+        arr = json.loads(text)
+        if not isinstance(arr, list) or len(arr) != len(emails):
+            return []
+        results = []
+        for i, data in enumerate(arr):
+            if not isinstance(data, dict):
+                results.append(_parse_single_result({}, *emails[i]))
+            else:
+                results.append(_parse_single_result(data, *emails[i]))
+        return results
+    except Exception:
+        return []
 
 
 def normalize_company_name(name: str) -> str:

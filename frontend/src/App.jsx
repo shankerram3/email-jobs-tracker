@@ -228,6 +228,7 @@ function TrackerApp({ logout, user }) {
   const [filter, setFilter] = useState('ALL')
   const [syncing, setSyncing] = useState(false)
   const [syncMode, setSyncMode] = useState('auto')
+  const [syncFromDate, setSyncFromDate] = useState('')
   const [syncProgress, setSyncProgress] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -293,7 +294,9 @@ function TrackerApp({ logout, user }) {
     setError(null)
     setSyncProgress({ status: 'syncing', message: 'Starting…', processed: 0, total: 0 })
     try {
-      await api().post(`/api/sync-emails?mode=${syncMode}`)
+      const params = new URLSearchParams({ mode: syncMode })
+      if (syncFromDate) params.set('after_date', syncFromDate)
+      await api().post(`/api/sync-emails?${params.toString()}`)
       const t = localStorage.getItem('token')
       const es = new EventSource(`${API_URL}/api/sync-events${t ? `?token=${encodeURIComponent(t)}` : ''}`)
       eventSourceRef.current = es
@@ -385,6 +388,14 @@ function TrackerApp({ logout, user }) {
             <option value="full">Full sync</option>
             <option value="incremental">Incremental only</option>
           </select>
+          <input
+            type="date"
+            className="sync-from-date"
+            value={syncFromDate}
+            onChange={(e) => setSyncFromDate(e.target.value)}
+            disabled={syncing}
+            title="Sync from date (optional, for full sync)"
+          />
           <button
             className="sync-btn"
             onClick={syncEmails}

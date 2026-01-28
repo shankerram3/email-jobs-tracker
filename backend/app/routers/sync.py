@@ -25,7 +25,7 @@ from ..gmail_service import (
 router = APIRouter(prefix="/api", tags=["sync"])
 
 
-def _run_sync_task(mode: str, user_id: int):
+def _run_sync_task(mode: str, user_id: int, after_date: Optional[str] = None):
     session = SessionLocal()
     try:
         def on_progress(processed: int, total: int, message: str):
@@ -33,7 +33,9 @@ def _run_sync_task(mode: str, user_id: int):
 
         set_syncing(total=0, user_id=user_id)
         set_sync_state_syncing(session, user_id)
-        result = run_sync_with_options(session, mode=mode, on_progress=on_progress, user_id=user_id)
+        result = run_sync_with_options(
+            session, mode=mode, on_progress=on_progress, user_id=user_id, after_date=after_date
+        )
         if result.get("error"):
             set_error(result["error"], user_id)
             set_sync_state_error(session, result["error"], user_id)
@@ -88,9 +90,10 @@ def gmail_callback(code: Optional[str] = None, state: Optional[str] = None):
 async def sync_emails(
     background_tasks: BackgroundTasks,
     mode: Optional[str] = "auto",
+    after_date: Optional[str] = None,
     current_user: User = Depends(get_current_user_required),
 ):
-    """Start email sync. mode=auto|incremental|full. auto = full once (no historyId), then incremental. Poll GET /api/sync-status or GET /api/sync-events for progress."""
+    """Start email sync. mode=auto|incremental|full. Optional after_date (YYYY-MM-DD or YYYY/MM/DD) for full sync. Poll GET /api/sync-status or GET /api/sync-events for progress."""
     if mode not in ("auto", "incremental", "full"):
         mode = "auto"
     if not _gmail_creds_ready_for_background():
@@ -99,8 +102,8 @@ async def sync_emails(
             status_code=400,
             detail="Gmail authorization required. Open /api/gmail/auth in your browser to sign in, then try Sync again.",
         )
-    background_tasks.add_task(_run_sync_task, mode, current_user.id)
-    return {"message": "Email sync started.", "status": "syncing", "mode": mode}
+    background_tasks.add_task(_run_sync_task, mode, current_user.id, after_date)
+    return {"message": "Email sync started.", "status": "syncing", "mode": mode, "after_date": after_date}
 
 
 @router.get("/sync-status")
