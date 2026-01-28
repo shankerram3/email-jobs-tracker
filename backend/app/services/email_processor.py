@@ -190,7 +190,7 @@ def run_sync_with_options(
             fetch_error = None
             for idx, q in enumerate(queries, 1):
                 try:
-                    logger.info(f"Query {idx}/{len(queries)}: {q[:100]}...")
+                    logger.info(f"Query {idx}/{len(queries)}: running...")
                     emails = fetch_emails(service, q, max_results=settings.gmail_full_sync_max_per_query)
                     logger.info(f"  → Found {len(emails)} emails")
                     new_emails = 0
@@ -224,15 +224,19 @@ def run_sync_with_options(
             mid, subject, sender, body, received_iso = email_to_parts(email)
         except Exception as e:
             logger.error(f"Email {i+1}/{total}: Failed to parse - {str(e)}")
-            db.add(EmailLog(gmail_message_id=email.get("id", ""), error=str(e)))
+            db.add(EmailLog(gmail_message_id=email.get("id", ""), user_id=user_id, error=str(e)))
             db.commit()
             errors += 1
             progress(i + 1, total, "Classifying…")
             continue
 
-        existing = db.query(Application).filter(Application.gmail_message_id == mid).first()
+        # Per-user idempotency: same (user_id, gmail_message_id) = already exists
+        existing_q = db.query(Application).filter(Application.gmail_message_id == mid)
+        if user_id is not None:
+            existing_q = existing_q.filter(Application.user_id == user_id)
+        existing = existing_q.first()
         if existing:
-            logger.debug(f"Email {i+1}/{total}: Already exists - {subject[:50]}")
+            logger.debug(f"Email {i+1}/{total}: Already exists (msg_id={mid})")
             skipped += 1
             skipped_existing += 1
             progress(i + 1, total, "Classifying…")
@@ -242,7 +246,7 @@ def run_sync_with_options(
             structured = classify_and_cache(db, subject, body, sender)
         except Exception as e:
             logger.error(f"Email {i+1}/{total}: Classification failed - {str(e)[:100]}")
-            db.add(EmailLog(gmail_message_id=mid, error=str(e), classification=None))
+            db.add(EmailLog(gmail_message_id=mid, user_id=user_id, error=str(e), classification=None))
             db.commit()
             errors += 1
             progress(i + 1, total, "Classifying…")
@@ -260,17 +264,18 @@ def run_sync_with_options(
         company = structured.get("company_name") or "Unknown"
         job_title = structured.get("job_title")
         if _is_duplicate_application(db, company, job_title, received, user_id):
-            logger.info(f"Email {i+1}/{total}: DUPLICATE - {company} / {job_title} - {subject[:50]}")
+            logger.info(f"Email {i+1}/{total}: DUPLICATE (msg_id={mid})")
             skipped += 1
             skipped_duplicate += 1
             progress(i + 1, total, "Classifying…")
             continue
 
         category = structured.get("category") or "OTHER"
-        logger.info(f"Email {i+1}/{total}: CREATING - {company} / {job_title} / {category} - {subject[:50]}")
+        logger.info(f"Email {i+1}/{total}: CREATING (msg_id={mid}, category={category})")
 
         app = Application(
             gmail_message_id=mid,
+            user_id=user_id,
             company_name=company[:255],
             position=job_title[:255] if job_title else None,
             job_title=job_title[:255] if job_title else None,
@@ -289,7 +294,7 @@ def run_sync_with_options(
         )
         _set_transition_timestamps(app, received, category)
         db.add(app)
-        db.add(EmailLog(gmail_message_id=mid, classification=category))
+        db.add(EmailLog(gmail_message_id=mid, user_id=user_id, classification=category))
         db.commit()
         created += 1
         progress(i + 1, total, "Classifying…")

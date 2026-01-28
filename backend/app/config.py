@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     # Gmail - paths relative to backend/ or set absolute
     credentials_path: str = "credentials.json"
     token_path: str = "token.pickle"
+    # If set, OAuth uses this redirect_uri (e.g. http://localhost:8000/api/gmail/callback) for CSRF state validation
+    gmail_oauth_redirect_uri: Optional[str] = None
 
     # AI - set OPENAI_API_KEY for OpenAI classification
     openai_api_key: str = ""

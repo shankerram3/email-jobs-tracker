@@ -61,7 +61,7 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 
 - **Backend:** FastAPI (Python), Gmail API (history + search), OpenAI (structured classification), SQLAlchemy (SQLite/PostgreSQL), Alembic (migrations), Celery + Redis (optional async jobs), SSE (sync progress)
 - **Frontend:** React, Vite, Recharts, Axios
-- **Auth:** JWT (HS256) or static API key in header; optional — all endpoints work without auth if neither `SECRET_KEY` nor `API_KEY` is set
+- **Auth:** JWT (HS256) or static API key in header. Protected endpoints (applications, sync, analytics) require authentication; if neither `SECRET_KEY` nor `API_KEY` is set, those routes return 401. Set at least one for normal use (e.g. `SECRET_KEY` and use `POST /api/login`, or `API_KEY` in header).
 
 ---
 
@@ -138,6 +138,7 @@ Create `backend/.env` (do not commit). All settings are read via `config.Setting
 | **Gmail** | | |
 | `credentials_path` | `credentials.json` | Path to Google OAuth client JSON (relative to backend or absolute). |
 | `token_path` | `token.pickle` | Path to store OAuth token. |
+| `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, OAuth uses this as redirect_uri (e.g. `http://localhost:8000/api/gmail/callback`) and validates a CSRF `state` parameter. Add this exact URI to your Google OAuth client’s redirect URIs. |
 | **AI** | | |
 | `OPENAI_API_KEY` | `""` | Required for LLM classification. |
 | **CORS** | | |
@@ -146,8 +147,8 @@ Create `backend/.env` (do not commit). All settings are read via `config.Setting
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL (Celery broker and optional cache). |
 | `CELERY_BROKER_URL` | (uses REDIS_URL) | Override Celery broker. |
 | **Auth** | | |
-| `SECRET_KEY` | `""` | JWT signing key; if set, login returns JWT. |
-| `API_KEY` | `""` | Optional static API key (sent in header). |
+| `SECRET_KEY` | `""` | JWT signing key; if set, login returns JWT. Required for protected routes unless `API_KEY` is set. |
+| `API_KEY` | `""` | Optional static API key (sent in header). When set, protected routes accept this instead of JWT. |
 | `API_KEY_HEADER` | `X-API-Key` | Header name for API key. |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm. |
 | `JWT_EXPIRE_MINUTES` | `10080` | JWT expiry (7 days). |
@@ -178,8 +179,8 @@ Create `backend/.env` (do not commit). All settings are read via `config.Setting
    - `OPENAI_API_KEY` — required for email classification
    - `DATABASE_URL` — optional (default SQLite)
    - `REDIS_URL` — if using Celery (default `redis://localhost:6379/0`)
-   - `SECRET_KEY` — for JWT (optional); if set, use `POST /api/login` or API key
-   - `API_KEY` — optional static API key (header: `X-API-Key` by default)
+   - `SECRET_KEY` — for JWT; use `POST /api/login` to get a token (or set `API_KEY` for header auth)
+   - `API_KEY` — optional static API key (header: `X-API-Key` by default). Protected routes require either JWT or API key.
 
 3. **Gmail OAuth:** Place Google OAuth client JSON at `backend/credentials.json` (APIs & Services → Credentials → OAuth 2.0 Client ID → download JSON). Then open **`GET /api/gmail/auth`** in a browser to authorize; after that, sync can run in the background.
 
@@ -220,7 +221,7 @@ App: http://localhost:5173 (proxies `/api` to backend).
 - **Full (`mode=full`):** Gmail search by subject/from, paginated; respects `GMAIL_FULL_SYNC_*` (max per query, after date, days back, ignore last_synced).
 - **Incremental (`mode=incremental`):** Uses `sync_state.last_history_id` and Gmail history API.
 
-**Gmail auth:** Sync must have valid OAuth credentials. The backend checks “credentials ready for background” before starting. If not, it returns 400 and tells the user to open **`GET /api/gmail/auth`** in the browser. Optional query: `?redirect_url=http://localhost:5173` to return to the app after auth.
+**Gmail auth:** Sync must have valid OAuth credentials. The backend checks “credentials ready for background” before starting. If not, it returns 400 and tells the user to open **`GET /api/gmail/auth`** in the browser. Optional query: `?redirect_url=http://localhost:5173` to return to the app after auth. For CSRF protection, set **`GMAIL_OAUTH_REDIRECT_URI`** (e.g. `http://localhost:8000/api/gmail/callback`) and add that URI to your Google OAuth client; the flow will use **`GET /api/gmail/callback`** and validate the `state` parameter.
 
 ---
 
@@ -242,10 +243,11 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 
 | Method | Path | Query / Body | Description |
 |--------|------|--------------|-------------|
-| GET | `/api/gmail/auth` | Optional: `redirect_url` | Redirects to Gmail OAuth; after consent, redirects to `redirect_url` or localhost:5173. |
+| GET | `/api/gmail/auth` | Optional: `redirect_url` | Redirects to Gmail OAuth; after consent, redirects to `redirect_url` or localhost:5173. When `GMAIL_OAUTH_REDIRECT_URI` is set, uses CSRF state. |
+| GET | `/api/gmail/callback` | `code`, `state` (from Google) | OAuth callback when `GMAIL_OAUTH_REDIRECT_URI` is set; validates state and exchanges code for token. |
 | POST | `/api/sync-emails` | Query: `mode=auto\|incremental\|full` | Start sync in background; returns immediately. |
-| GET | `/api/sync-status` | — | Current progress: status, message, processed, total, created, skipped, errors, error. |
-| GET | `/api/sync-events` | Optional: `token` (for SSE without custom headers) | SSE stream of sync progress until status is idle or error. |
+| GET | `/api/sync-status` | — | Current sync progress for this user: status, message, processed, total, created, skipped, errors, error. |
+| GET | `/api/sync-events` | Optional: `token` (for SSE without custom headers) | SSE stream of sync progress for this user until status is idle or error. |
 
 ### Analytics
 

@@ -2,6 +2,7 @@
 import base64
 import os
 import pickle
+import secrets
 import time
 import re
 import logging
@@ -17,6 +18,11 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .config import settings
+
+# CSRF state for OAuth when gmail_oauth_redirect_uri is set: state -> {redirect_url, created_at}
+_oauth_state_store: dict[str, dict] = {}
+_oauth_state_lock = __import__("threading").Lock()
+OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -60,6 +66,62 @@ def _gmail_creds_ready_for_background() -> bool:
         except Exception:
             return False
     return False
+
+
+def _clean_oauth_states():
+    """Remove expired state entries."""
+    now = time.time()
+    with _oauth_state_lock:
+        expired = [s for s, v in _oauth_state_store.items() if now - v.get("created_at", 0) > OAUTH_STATE_TTL_SECONDS]
+        for s in expired:
+            _oauth_state_store.pop(s, None)
+
+
+def start_gmail_oauth(redirect_url_after: str) -> str:
+    """
+    Start OAuth with CSRF state. Use when gmail_oauth_redirect_uri is set.
+    Returns the Google authorization URL to redirect the user to.
+    Call finish_gmail_oauth(code, state) in the callback.
+    """
+    creds_path = _resolve_path(settings.credentials_path)
+    if not os.path.exists(creds_path):
+        raise FileNotFoundError(
+            f"Gmail credentials not found at {creds_path}. "
+            "Download from Google Cloud Console and save as credentials.json"
+        )
+    redirect_uri = settings.gmail_oauth_redirect_uri
+    if not redirect_uri:
+        raise ValueError("GMAIL_OAUTH_REDIRECT_URI must be set to use start_gmail_oauth")
+    state = secrets.token_urlsafe(32)
+    with _oauth_state_lock:
+        _oauth_state_store[state] = {"redirect_url": redirect_url_after, "created_at": time.time()}
+    _clean_oauth_states()
+    flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES, redirect_uri=redirect_uri)
+    auth_url, _ = flow.authorization_url(prompt="consent", state=state, access_type="offline")
+    return auth_url
+
+
+def finish_gmail_oauth(code: str, state: str) -> str:
+    """
+    Validate state and exchange code for tokens. Returns redirect_url to send the user to.
+    Raises ValueError if state is invalid or expired.
+    """
+    _clean_oauth_states()
+    with _oauth_state_lock:
+        entry = _oauth_state_store.pop(state, None)
+    if not entry:
+        raise ValueError("Invalid or expired OAuth state")
+    redirect_url = entry.get("redirect_url", "http://localhost:5173")
+    creds_path = _resolve_path(settings.credentials_path)
+    token_path = _resolve_path(settings.token_path)
+    flow = InstalledAppFlow.from_client_secrets_file(
+        creds_path, SCOPES, redirect_uri=settings.gmail_oauth_redirect_uri
+    )
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    with open(token_path, "wb") as token:
+        pickle.dump(creds, token)
+    return redirect_url
 
 
 def get_gmail_service(allow_interactive_oauth: bool = False):

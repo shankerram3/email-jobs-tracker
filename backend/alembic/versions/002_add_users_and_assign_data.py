@@ -116,12 +116,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    is_sqlite = conn.dialect.name == "sqlite"
+
     op.drop_index("ix_applications_user_gmail", table_name="applications")
     op.drop_index(op.f("ix_sync_state_user_id"), table_name="sync_state")
-    op.drop_constraint("fk_sync_state_user_id", "sync_state", type_="foreignkey")
+    # Only drop FKs if they exist (non-SQLite); upgrade skips creating them on SQLite
+    if not is_sqlite:
+        op.drop_constraint("fk_sync_state_user_id", "sync_state", type_="foreignkey")
     op.drop_column("sync_state", "user_id")
     op.drop_index(op.f("ix_applications_user_id"), table_name="applications")
-    op.drop_constraint("fk_applications_user_id", "applications", type_="foreignkey")
+    if not is_sqlite:
+        op.drop_constraint("fk_applications_user_id", "applications", type_="foreignkey")
     op.drop_column("applications", "user_id")
     op.drop_index(op.f("ix_users_google_id"), table_name="users")
     op.drop_index(op.f("ix_users_email"), table_name="users")

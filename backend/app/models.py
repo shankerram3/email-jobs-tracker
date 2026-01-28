@@ -62,6 +62,7 @@ class EmailLog(Base):
     __tablename__ = "email_logs"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     gmail_message_id = Column(String, index=True)
     processed_at = Column(DateTime, default=datetime.utcnow)
     classification = Column(String, nullable=True)

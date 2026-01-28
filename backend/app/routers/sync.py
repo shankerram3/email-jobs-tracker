@@ -12,7 +12,14 @@ from ..services.email_processor import run_sync_with_options
 from ..sync_state import get_state, set_syncing, update_progress, set_idle, set_error
 from ..auth import get_current_user_required, get_current_user_for_sse
 from ..models import User
-from ..gmail_service import get_gmail_service, GmailAuthRequiredError, _gmail_creds_ready_for_background
+from ..config import settings
+from ..gmail_service import (
+    get_gmail_service,
+    GmailAuthRequiredError,
+    _gmail_creds_ready_for_background,
+    start_gmail_oauth,
+    finish_gmail_oauth,
+)
 
 router = APIRouter(prefix="/api", tags=["sync"])
 
@@ -21,18 +28,18 @@ def _run_sync_task(mode: str, user_id: int):
     session = SessionLocal()
     try:
         def on_progress(processed: int, total: int, message: str):
-            update_progress(processed, total, message)
+            update_progress(processed, total, message, user_id)
 
-        set_syncing(total=0)
+        set_syncing(total=0, user_id=user_id)
         result = run_sync_with_options(session, mode=mode, on_progress=on_progress, user_id=user_id)
         if result.get("error"):
-            set_error(result["error"])
+            set_error(result["error"], user_id)
         else:
-            set_idle(result)
+            set_idle(result, user_id)
     except GmailAuthRequiredError as e:
-        set_error(str(e))
+        set_error(str(e), user_id)
     except Exception as e:
-        set_error(str(e))
+        set_error(str(e), user_id)
     finally:
         session.close()
 
@@ -42,13 +49,33 @@ def gmail_auth(redirect_url: Optional[str] = None):
     """
     Complete Gmail OAuth in the browser. Open this URL in your browser to sign in;
     after that, Sync will work without blocking. Optional: ?redirect_url=http://localhost:5173
+    When GMAIL_OAUTH_REDIRECT_URI is set, uses CSRF state; add GET /api/gmail/callback as redirect URI in Google Cloud.
     """
+    redirect_after = redirect_url or "http://localhost:5173"
     try:
+        if settings.gmail_oauth_redirect_uri:
+            auth_url = start_gmail_oauth(redirect_url_after=redirect_after)
+            return RedirectResponse(url=auth_url, status_code=302)
         get_gmail_service(allow_interactive_oauth=True)
     except FileNotFoundError as e:
         return {"error": str(e), "hint": "Add credentials.json from Google Cloud Console to the backend folder."}
-    url = redirect_url or "http://localhost:5173"
-    return RedirectResponse(url=url, status_code=302)
+    except ValueError as e:
+        return {"error": str(e)}
+    return RedirectResponse(url=redirect_after, status_code=302)
+
+
+@router.get("/gmail/callback")
+def gmail_callback(code: Optional[str] = None, state: Optional[str] = None):
+    """
+    OAuth callback when GMAIL_OAUTH_REDIRECT_URI is set. Validates state and exchanges code for token.
+    """
+    if not code or not state:
+        return {"error": "Missing code or state"}
+    try:
+        redirect_url = finish_gmail_oauth(code=code, state=state)
+        return RedirectResponse(url=redirect_url, status_code=302)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @router.post("/sync-emails")
@@ -72,14 +99,14 @@ async def sync_emails(
 
 @router.get("/sync-status")
 def sync_status(current_user: User = Depends(get_current_user_required)):
-    """Current sync progress: status, message, processed, total, created, skipped, errors, error."""
-    return get_state()
+    """Current sync progress for this user: status, message, processed, total, created, skipped, errors, error."""
+    return get_state(current_user.id)
 
 
-async def _sse_generator():
-    """Yield SSE events with sync progress until status is idle or error."""
+async def _sse_generator(user_id: int):
+    """Yield SSE events with sync progress for this user until status is idle or error."""
     while True:
-        state = get_state()
+        state = get_state(user_id)
         data = json.dumps(state)
         yield {"data": data}
         if state.get("status") in ("idle", "error"):
@@ -91,5 +118,5 @@ async def _sse_generator():
 async def sync_events(
     current_user: User = Depends(get_current_user_for_sse),
 ):
-    """SSE stream of sync progress. Pass ?token=JWT in URL when using EventSource (browser cannot set Authorization header)."""
-    return EventSourceResponse(_sse_generator())
+    """SSE stream of sync progress for this user. Pass ?token=JWT in URL when using EventSource (browser cannot set Authorization header)."""
+    return EventSourceResponse(_sse_generator(current_user.id))
