@@ -2,7 +2,7 @@
 import hashlib
 import json
 import re
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Iterable
 
 from .config import settings
 
@@ -72,41 +72,141 @@ def _regex_salary(text: str) -> tuple[Optional[float], Optional[float]]:
     return (min_val, max_val)
 
 
-def _suggests_interview_request(body: str) -> bool:
-    """True if body clearly indicates recruiter wants to schedule/conduct an interview or call."""
-    text = (body or "").lower()
-    phrases = [
-        r"schedule\s+(?:a\s+)?(?:introductory\s+)?call",
-        r"introductory\s+call",
-        r"dates?\s+and\s+times?\s+(?:that\s+)?(?:work|(?:you['\u2019]?re\s+)?available)",
-        r"phone\s+call\s+with\s+(?:me|us)",
-        r"take\s+the\s+next\s+step",
-        r"next\s+step\s+in\s+getting\s+to\s+know\s+you",
-        r"get(?:ting)?\s+to\s+know\s+you\s+better",
-        r"(?:would\s+like\s+to\s+)?schedule\s+.*\s+(?:call|interview)",
-        r"available\s+for\s+(?:a\s+)?(?:\d+\s*[-–]\s*\d+\s+)?(?:minute\s+)?(?:phone\s+)?call",
-        r"invit(e|ing)\s+you\s+for\s+(?:an?\s+)?interview",
+def _normalize_text(*parts: str) -> str:
+    text = " ".join(p or "" for p in parts)
+    text = re.sub(r"\s+", " ", text.lower())
+    return text.strip()
+
+
+def _matches_any(text: str, patterns: Iterable[str]) -> bool:
+    return any(re.search(p, text) for p in patterns)
+
+
+def _has_conditional_interview_language(text: str) -> bool:
+    conditional_phrases = [
+        r"if\s+(?:you(?:'|’)?re|we(?:'|’)?re)\s+selected\s+for\s+an?\s+interview",
+        r"if\s+selected\s+for\s+an?\s+interview",
+        r"if\s+we\s+decide\s+to\s+move\s+forward",
+        r"if\s+we\s+move\s+forward",
+        r"should\s+you\s+advance\s+to\s+the\s+next\s+step",
+        r"if\s+chosen\s+to\s+move\s+forward",
     ]
-    return any(re.search(p, text) for p in phrases)
+    return _matches_any(text, conditional_phrases)
 
 
-def apply_category_overrides(result: dict, body: str) -> dict:
+def _rule_based_category(subject: str, body: str, sender: str) -> Optional[str]:
+    """Return a strong rule-based category when we are confident; otherwise None."""
+    text = _normalize_text(subject, body, sender)
+
+    offer_phrases = [
+        r"we(?:'|’)?re\s+pleased\s+to\s+offer",
+        r"we(?:'|’)?d\s+like\s+to\s+extend\s+an?\s+offer",
+        r"offer\s+letter",
+        r"congratulations\s+on\s+your\s+offer",
+        r"compensation\s+package",
+    ]
+    if _matches_any(text, offer_phrases):
+        return "OFFER"
+
+    rejection_phrases = [
+        r"unfortunately",
+        r"regret\s+to\s+inform",
+        r"we(?:'|’)?re\s+sorry\s+to\s+inform",
+        r"not\s+moving\s+forward",
+        r"will\s+not\s+be\s+moving\s+forward",
+        r"decided\s+to\s+move\s+forward\s+with\s+other\s+candidates",
+        r"not\s+selected",
+        r"position\s+has\s+been\s+filled",
+        r"we\s+will\s+not\s+proceed",
+    ]
+    if _matches_any(text, rejection_phrases):
+        return "REJECTION"
+
+    assessment_phrases = [
+        r"coding\s+challenge",
+        r"take[-\s]?home\s+assignment",
+        r"assessment",
+        r"online\s+assessment",
+        r"hackerrank",
+        r"codesignal",
+        r"codility",
+        r"technical\s+assessment",
+        r"skill\s+assessment",
+    ]
+    if _matches_any(text, assessment_phrases):
+        return "ASSESSMENT"
+
+    interview_phrases = [
+        r"invit(?:e|ing)\s+you\s+for\s+an?\s+interview",
+        r"schedule\s+an?\s+interview",
+        r"interview\s+with\s+our\s+team",
+        r"next\s+step.*interview",
+        r"interview\s+process",
+        r"onsite\s+interview",
+        r"panel\s+interview",
+        r"technical\s+interview",
+    ]
+    screening_phrases = [
+        r"intro(?:ductory)?\s+call",
+        r"phone\s+screen",
+        r"recruiter\s+screen",
+        r"screening\s+call",
+        r"15[-–]\s*30\s+min(?:ute)?\s+call",
+        r"schedule\s+(?:a\s+)?call",
+        r"available\s+for\s+(?:a\s+)?call",
+        r"dates?\s+and\s+times?\s+(?:that\s+)?(?:work|(?:you['\u2019]?re\s+)?available)",
+    ]
+
+    if _matches_any(text, screening_phrases):
+        return "SCREENING_REQUEST"
+    if _matches_any(text, interview_phrases):
+        return "INTERVIEW_REQUEST"
+
+    application_received_phrases = [
+        r"thank\s+you\s+for\s+applying",
+        r"thanks?\s+for\s+applying",
+        r"we\s+received\s+your\s+application",
+        r"application\s+received",
+        r"your\s+application\s+has\s+been\s+received",
+        r"we\s+appreciate\s+your\s+interest",
+        r"thanks?\s+for\s+your\s+interest",
+        r"we(?:'|’)?ll\s+review\s+your\s+application",
+        r"reviewing\s+your\s+application",
+    ]
+    if _matches_any(text, application_received_phrases) or _has_conditional_interview_language(text):
+        return "APPLICATION_RECEIVED"
+
+    recruiter_outreach_phrases = [
+        r"came\s+across\s+your\s+profile",
+        r"found\s+your\s+profile",
+        r"noticed\s+your\s+profile",
+        r"reaching\s+out\s+about\s+an?\s+opportunity",
+        r"would\s+you\s+be\s+interested\s+in",
+        r"opportunity\s+for\s+you",
+    ]
+    if _matches_any(text, recruiter_outreach_phrases):
+        return "RECRUITER_OUTREACH"
+
+    return None
+
+
+def apply_category_overrides(result: dict, subject: str, body: str, sender: str) -> dict:
     """
-    Apply keyword-based overrides so clear interview/screening-scheduling emails are
-    INTERVIEW_REQUEST or SCREENING_REQUEST even when LLM or cache returned something else.
+    Apply keyword-based overrides so clear outcomes (offer, rejection, assessment,
+    screening/interview scheduling, or application received) supersede LLM output.
     """
     if not result:
         return result
-    cat = result.get("category")
-    if cat in ("INTERVIEW_REQUEST", "SCREENING_REQUEST"):
-        return result
-    if _suggests_interview_request(body or ""):
-        # Prefer SCREENING_REQUEST for "intro call", "phone call", "15-30 min"; else INTERVIEW_REQUEST
-        text = (body or "").lower()
-        if re.search(r"(?:intro(?:ductory)?\s+call|phone\s+call|15[-–]\s*30\s+min)", text):
-            result = {**result, "category": "SCREENING_REQUEST"}
-        else:
-            result = {**result, "category": "INTERVIEW_REQUEST"}
+
+    rule_category = _rule_based_category(subject, body, sender)
+    if rule_category:
+        return {**result, "category": rule_category}
+
+    # Guard against LLM over-weighting conditional interview language
+    if result.get("category") in ("INTERVIEW_REQUEST", "SCREENING_REQUEST"):
+        text = _normalize_text(subject, body)
+        if _has_conditional_interview_language(text):
+            return {**result, "category": "APPLICATION_RECEIVED"}
     return result
 
 
@@ -135,7 +235,12 @@ def structured_classify_email(subject: str, body: str, sender: str) -> dict:
     On LLM failure, use regex fallback for salary and job_title; category defaults to OTHER.
     """
     body_sample = (body or "")[:2000]
-    prompt = f"""Classify this job application email and extract structured data.
+    prompt = f"""You are an email triage model for job-application workflows.
+Follow the category definitions exactly and return strict JSON only.
+Important: phrases like "if selected for an interview" or "if we move forward"
+mean APPLICATION_RECEIVED, not INTERVIEW_REQUEST or SCREENING_REQUEST.
+
+Classify this job application email and extract structured data.
 
 Category definitions (pick the best match):
 - INTERVIEW_REQUEST: Recruiter/company wants to schedule or conduct a full interview (e.g. onsite, panel, technical round).
@@ -157,6 +262,20 @@ Return a JSON object with exactly these keys (use null for unknown):
 - location: string or null
 - confidence: number 0.0 to 1.0
 
+Examples:
+
+Subject: Thank you for applying to DigitalOcean!
+Body: Thank you for your interest... If selected for an interview, a recruiter will reach out within two weeks.
+JSON: {{"category":"APPLICATION_RECEIVED","subcategory":null,"company_name":"DigitalOcean","job_title":"Senior Software Engineer","salary_min":null,"salary_max":null,"location":null,"confidence":0.68}}
+
+Subject: Interview invitation for Senior Software Engineer
+Body: We'd like to schedule a 30 minute phone screen. Please share times that work.
+JSON: {{"category":"SCREENING_REQUEST","subcategory":"phone_screen","company_name":"Unknown","job_title":"Senior Software Engineer","salary_min":null,"salary_max":null,"location":null,"confidence":0.76}}
+
+Subject: Next steps for your application
+Body: We enjoyed your profile and would like to invite you for a technical interview.
+JSON: {{"category":"INTERVIEW_REQUEST","subcategory":"technical","company_name":"Unknown","job_title":null,"salary_min":null,"salary_max":null,"location":null,"confidence":0.78}}
+
 Email:
 Subject: {subject}
 From: {sender}
@@ -167,9 +286,14 @@ Return ONLY valid JSON, no other text."""
     try:
         client = _get_client()
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
+            model=settings.openai_model,
+            temperature=settings.openai_temperature,
+            max_tokens=450,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Return strict JSON only. Do not add markdown or commentary."},
+                {"role": "user", "content": prompt},
+            ],
         )
         text = (response.choices[0].message.content or "").strip()
         # Strip markdown code block if present
@@ -216,7 +340,7 @@ Return ONLY valid JSON, no other text."""
         "location": location,
         "confidence": confidence,
     }
-    return apply_category_overrides(result, body)
+    return apply_category_overrides(result, subject, body, sender)
 
 
 def classify_email_llm_only(subject: str, body: str, sender: str) -> dict:
@@ -282,7 +406,11 @@ def structured_classify_emails_batch(
             f"--- Email {i + 1} ---\nSubject: {subject}\nFrom: {sender}\nBody: {body_sample}"
         )
     combined = "\n\n".join(parts)
-    prompt = f"""Classify each of the following job application emails and extract structured data.
+    prompt = f"""You are an email triage model for job-application workflows.
+Return strict JSON only. Do not infer interviews from conditional language like
+"if selected for an interview" or "if we move forward" (these are APPLICATION_RECEIVED).
+
+Classify each of the following job application emails and extract structured data.
 
 Category definitions (pick the best match for each email):
 - INTERVIEW_REQUEST: Recruiter/company wants to schedule or conduct a full interview (onsite, panel, technical round).
@@ -294,7 +422,7 @@ Category definitions (pick the best match for each email):
 - OFFER: Job offer or compensation discussion.
 - OTHER: None of the above.
 
-Return a JSON array of objects. Each object must have exactly these keys (use null for unknown):
+Return a JSON object with a top-level "results" array. Each array item must have exactly these keys (use null for unknown):
 - category: one of REJECTION, INTERVIEW_REQUEST, SCREENING_REQUEST, ASSESSMENT, RECRUITER_OUTREACH, APPLICATION_RECEIVED, OFFER, OTHER
 - subcategory: optional string (e.g. "phone_screen", "onsite")
 - company_name: string company name or "Unknown"
@@ -308,19 +436,25 @@ Emails:
 
 {combined}
 
-Return ONLY a valid JSON array of {len(emails)} objects, no other text."""
+Return ONLY a valid JSON object with a "results" array of {len(emails)} items, no other text."""
 
     try:
         client = _get_client()
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=min(400 * len(emails) + 200, 4096),
-            messages=[{"role": "user", "content": prompt}],
+            model=settings.openai_model,
+            temperature=settings.openai_temperature,
+            max_tokens=min(450 * len(emails) + 200, 4096),
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Return strict JSON only. Do not add markdown or commentary."},
+                {"role": "user", "content": prompt},
+            ],
         )
         text = (response.choices[0].message.content or "").strip()
         if text.startswith("```"):
             text = re.sub(r"^```\w*\n?", "", text).replace("```", "").strip()
-        arr = json.loads(text)
+        payload = json.loads(text)
+        arr = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(arr, list) or len(arr) != len(emails):
             return []
         results = []
@@ -329,8 +463,8 @@ Return ONLY a valid JSON array of {len(emails)} objects, no other text."""
                 r = _parse_single_result({}, *emails[i])
             else:
                 r = _parse_single_result(data, *emails[i])
-            _, body, _ = emails[i]
-            results.append(apply_category_overrides(r, body))
+            subject, body, sender = emails[i]
+            results.append(apply_category_overrides(r, subject, body, sender))
         return results
     except Exception:
         return []

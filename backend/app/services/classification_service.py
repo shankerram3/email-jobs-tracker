@@ -43,7 +43,7 @@ def classify_and_cache(
     h = content_hash(subject, sender, body)
     cached = get_cached_classification(db, subject, sender, body)
     if cached is not None:
-        cached = apply_category_overrides(cached, body)
+        cached = apply_category_overrides(cached, subject, body, sender)
         company = normalize_company_with_db(db, cached["company_name"])
         cached["company_name"] = company
         return cached

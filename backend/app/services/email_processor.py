@@ -332,7 +332,7 @@ def run_sync_with_options(
 
         cached = get_cached_classification(db, subject, sender, body)
         if cached is not None:
-            cached = apply_category_overrides(cached, body)
+            cached = apply_category_overrides(cached, subject, body, sender)
             company = normalize_company_with_db(db, cached["company_name"])
             cached = {**cached, "company_name": company}
             received = _parse_received(received_iso)

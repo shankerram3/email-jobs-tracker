@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     # AI - set OPENAI_API_KEY for OpenAI classification
     openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    openai_temperature: float = 0.2
 
     # CORS
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
