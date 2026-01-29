@@ -66,6 +66,26 @@ def test_full_sync_uses_after_date_iso_format(db):
     assert any("2025/06/01" in q for q in captured_queries)
 
 
+def test_full_sync_uses_before_date_in_queries(db):
+    """run_sync_with_options with before_date set includes before: in Gmail queries."""
+    captured_queries = []
+
+    def capture_fetch(service, query, max_results=100):
+        captured_queries.append(query)
+        return []
+
+    mock_service = MagicMock()
+    with (
+        patch("app.services.email_processor.get_gmail_service", return_value=mock_service),
+        patch("app.services.email_processor.fetch_emails", side_effect=capture_fetch),
+        patch("app.services.email_processor.get_profile_history_id", return_value="hist1"),
+    ):
+        run_sync_with_options(db, mode="full", after_date="2024-01-01", before_date="2024-06-30")
+
+    assert len(captured_queries) > 0
+    assert any("2024/01/01" in q and "before:2024/06/30" in q for q in captured_queries)
+
+
 def test_classification_creates_application_on_cache_miss(db):
     """With one email from Gmail and cache miss, LLM result is persisted and Application created."""
     one_email = {

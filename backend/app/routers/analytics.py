@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -35,13 +35,13 @@ def get_funnel(
     q = _app_query(db, current_user)
     total = q.count()
     applied = total
-    interviews = q.filter(Application.category.in_(["INTERVIEW_REQUEST", "ASSESSMENT"])).count()
+    interviews = q.filter(Application.category.in_(["INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT"])).count()
     offers = q.filter(Application.category == "OFFER").count()
     rejections = q.filter(Application.category == "REJECTION").count()
 
     funnel = [
         FunnelStage(stage="Applied", count=applied, pct=100.0 if total else 0),
-        FunnelStage(stage="Interview", count=interviews, pct=round(100.0 * interviews / total, 1) if total else 0),
+        FunnelStage(stage="Interview / screening", count=interviews, pct=round(100.0 * interviews / total, 1) if total else 0),
         FunnelStage(stage="Offer", count=offers, pct=round(100.0 * offers / total, 1) if total else 0),
         FunnelStage(stage="Rejection", count=rejections, pct=round(100.0 * rejections / total, 1) if total else 0),
     ]
@@ -65,7 +65,7 @@ def get_response_rate(
         )
         applied = {r.category: r.cnt for r in rows}
         responded = (
-            q.filter(Application.category.in_(["REJECTION", "INTERVIEW_REQUEST", "ASSESSMENT", "OFFER"]))
+            q.filter(Application.category.in_(["REJECTION", "INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT", "OFFER"]))
             .with_entities(Application.category, func.count(Application.id).label("cnt"))
             .group_by(Application.category)
             .all()
@@ -88,7 +88,7 @@ def get_response_rate(
             .all()
         )
         responded = (
-            q.filter(Application.category.in_(["REJECTION", "INTERVIEW_REQUEST", "ASSESSMENT", "OFFER"]))
+            q.filter(Application.category.in_(["REJECTION", "INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT", "OFFER"]))
             .with_entities(Application.company_name, func.count(Application.id).label("cnt"))
             .group_by(Application.company_name)
             .all()
@@ -186,7 +186,7 @@ def _run_prediction_model(db: Session, user_id: int, limit: int) -> List[tuple]:
         cat_enc = le.transform([r.category or "OTHER"])[0]
         X.append([days, cat_enc])
     X = np.array(X)
-    y = np.array([1 if r.category == "OFFER" else (1 if r.category in ("INTERVIEW_REQUEST", "ASSESSMENT") else 0) for r in rows])
+    y = np.array([1 if r.category == "OFFER" else (1 if r.category in ("INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT") else 0) for r in rows])
     if y.sum() < 2:
         return []
     clf = LogisticRegression(max_iter=500, random_state=42)
@@ -204,8 +204,14 @@ def get_prediction(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
-    """Success prediction (basic logistic regression MVP). Returns application_id, company_name, probability."""
+    """Success prediction (basic logistic regression MVP). Returns application_id, company_name, probability.
+    Requires scikit-learn; returns 503 if not installed."""
     results = _run_prediction_model(db, current_user.id, limit)
+    if results is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Prediction model unavailable. Install scikit-learn.",
+        )
     items = [
         PredictionItem(application_id=aid, company_name=name, probability=round(p, 4), features=feat)
         for aid, name, p, feat in results

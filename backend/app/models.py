@@ -89,7 +89,23 @@ class SyncState(Base):
     last_full_sync_at = Column(DateTime, nullable=True)
     status = Column(String, default="idle")  # idle, syncing, error
     error = Column(Text, nullable=True)
+    processed = Column(Integer, default=0, nullable=True)
+    total = Column(Integer, default=0, nullable=True)
+    message = Column(String(255), nullable=True)
+    created = Column(Integer, default=0, nullable=True)
+    skipped = Column(Integer, default=0, nullable=True)
+    errors = Column(Integer, default=0, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OAuthState(Base):
+    """OAuth CSRF state for Gmail and Google Sign-in (shared store)."""
+    __tablename__ = "oauth_state"
+
+    state_token = Column(String(64), primary_key=True)
+    kind = Column(String(32), nullable=False, index=True)  # gmail, google_login
+    redirect_url = Column(String(512), nullable=True)
+    created_at = Column(DateTime, nullable=False)
 
 
 class Company(Base):

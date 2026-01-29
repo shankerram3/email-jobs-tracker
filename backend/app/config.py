@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     secret_key: str = ""  # for JWT signing; set SECRET_KEY in .env
     api_key_header: str = "X-API-Key"
     api_key: str = ""  # optional static API key; set API_KEY in .env
+    api_key_user_id: Optional[int] = None  # when set, API key maps to this user (multi-user safe)
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24 * 7  # 7 days
 
@@ -56,9 +57,9 @@ class Settings(BaseSettings):
 
     # Classification: max concurrent LLM calls (avoids rate limits)
     classification_max_concurrency: int = 5
-    # Batch prompt: group N emails in one LLM call (0 = disabled)
-    classification_batch_size: int = 0
-    classification_use_batch_prompt: bool = False
+    # Batch prompt: group N emails in one LLM call (reduces API calls; 0 = disabled)
+    classification_batch_size: int = 10
+    classification_use_batch_prompt: bool = True
 
     class Config:
         env_file = ".env"

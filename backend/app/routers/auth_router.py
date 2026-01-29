@@ -1,4 +1,6 @@
 """Auth API: email/password login, Sign in with Google (OAuth), JWT response, /me."""
+import secrets
+import urllib.parse
 from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,6 +8,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 import httpx
 
+from ..oauth_state_db import KIND_GOOGLE_LOGIN, oauth_state_set, oauth_state_consume
 from ..auth import (
     create_access_token,
     get_current_user,
@@ -108,7 +111,7 @@ def change_password(
 
 
 @router.get("/auth/google")
-def google_auth_start():
+def google_auth_start(redirect_url: Optional[str] = None):
     """Redirect to Google Sign-in. Frontend should link to this or redirect here."""
     if not settings.google_client_id:
         raise HTTPException(
@@ -116,7 +119,10 @@ def google_auth_start():
             detail="GOOGLE_CLIENT_ID not set. Add it to .env for Sign in with Google.",
         )
     redirect_uri = _google_redirect_uri()
-    import urllib.parse
+    frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+    after_login = redirect_url or frontend_origin
+    state = secrets.token_urlsafe(32)
+    oauth_state_set(KIND_GOOGLE_LOGIN, state, after_login)
     params = {
         "client_id": settings.google_client_id,
         "redirect_uri": redirect_uri,
@@ -124,6 +130,7 @@ def google_auth_start():
         "scope": " ".join(SCOPES),
         "access_type": "offline",
         "prompt": "consent",
+        "state": state,
     }
     url = GOOGLE_AUTH_URL + "?" + urllib.parse.urlencode(params)
     return RedirectResponse(url=url, status_code=302)
@@ -141,6 +148,13 @@ def google_auth_callback(
         # Redirect to frontend with error (e.g. user denied)
         frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
         return RedirectResponse(url=f"{frontend_origin}/login?error=access_denied", status_code=302)
+    if not state:
+        frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+        return RedirectResponse(url=f"{frontend_origin}/login?error=missing_state", status_code=302)
+    entry = oauth_state_consume(state)
+    if not entry:
+        frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+        return RedirectResponse(url=f"{frontend_origin}/login?error=invalid_state", status_code=302)
     if not code or not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(status_code=400, detail="Missing code or Google OAuth config")
 
@@ -218,5 +232,5 @@ def google_auth_callback(
     token = create_access_token(user.id, user.email)
 
     # Redirect to frontend with token in fragment (so it isn't sent to server logs)
-    frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+    frontend_origin = entry.get("redirect_url") or (settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173")
     return RedirectResponse(url=f"{frontend_origin}/login#token={token}", status_code=302)

@@ -149,6 +149,7 @@ Create `backend/.env` (do not commit). All settings are read via `config.Setting
 | **Auth** | | |
 | `SECRET_KEY` | `""` | JWT signing key; if set, login returns JWT. Required for protected routes unless `API_KEY` is set. |
 | `API_KEY` | `""` | Optional static API key (sent in header). When set, protected routes accept this instead of JWT. |
+| `API_KEY_USER_ID` | (none) | When set, API key auth resolves to this user id (use in multi-user deployments so the key does not expose the first user’s data). |
 | `API_KEY_HEADER` | `X-API-Key` | Header name for API key. |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm. |
 | `JWT_EXPIRE_MINUTES` | `10080` | JWT expiry (7 days). |
@@ -256,7 +257,7 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 | GET | `/api/analytics/funnel` | — | Funnel: Applied → Interview → Offer; plus Rejection count and percentages. |
 | GET | `/api/analytics/response-rate` | `group_by=company\|industry` | Response rate by company or by industry (category). |
 | GET | `/api/analytics/time-to-event` | `event=rejection\|interview` | Median and average days from received_date to event. |
-| GET | `/api/analytics/prediction` | `limit` (1–100, default 50) | Success prediction (logistic regression MVP); returns application_id, company_name, probability, features. |
+| GET | `/api/analytics/prediction` | `limit` (1–100, default 50) | Success prediction (logistic regression MVP); returns application_id, company_name, probability, features. Requires `scikit-learn`; returns 503 if not installed. |
 
 ### Auth
 
@@ -271,7 +272,7 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 - **Funnel:** Counts applied, interview (INTERVIEW_REQUEST + ASSESSMENT), offer, rejection; percentages of total.
 - **Response rate:** By company or by industry (category); applied vs responded (rejection/interview/assessment/offer); rate = responded / applied.
 - **Time-to-event:** From `received_date` to `rejected_at` or `interview_at`; median and average days; sample size.
-- **Prediction:** Simple logistic regression over recent applications (category one-hot, days_since_received); target = offer or interview; returns top N with probability (requires `sklearn`).
+- **Prediction:** Simple logistic regression over recent applications (category one-hot, days_since_received); target = offer or interview; returns top N with probability. **Requires the `scikit-learn` package.** If scikit-learn is not installed, `GET /api/analytics/prediction` returns 503 with detail "Prediction model unavailable. Install scikit-learn."
 
 ---
 

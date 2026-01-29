@@ -8,6 +8,7 @@ class ApplicationStats(BaseModel):
     total_applications: int
     rejections: int
     interviews: int
+    screening_requests: int
     assessments: int
     pending: int
     offers: int
@@ -27,6 +28,8 @@ class ApplicationResponse(BaseModel):
     confidence: Optional[float] = None
     received_date: Optional[datetime] = None
     email_subject: str
+    email_from: Optional[str] = None
+    email_body: Optional[str] = None
     applied_at: Optional[datetime] = None
     rejected_at: Optional[datetime] = None
     interview_at: Optional[datetime] = None

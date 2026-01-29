@@ -31,13 +31,15 @@ def get_stats(
     total = q.count()
     rejections = q.filter(Application.category == "REJECTION").count()
     interviews = q.filter(Application.category == "INTERVIEW_REQUEST").count()
+    screening_requests = q.filter(Application.category == "SCREENING_REQUEST").count()
     assessments = q.filter(Application.category == "ASSESSMENT").count()
     offers = q.filter(Application.category == "OFFER").count()
-    pending = total - (rejections + interviews + assessments + offers)
+    pending = total - (rejections + interviews + screening_requests + assessments + offers)
     return ApplicationStats(
         total_applications=total,
         rejections=rejections,
         interviews=interviews,
+        screening_requests=screening_requests,
         assessments=assessments,
         pending=max(0, pending),
         offers=offers,
@@ -54,7 +56,10 @@ def get_applications(
 ):
     query = _app_query(db, current_user)
     if status and status != "ALL":
-        query = query.filter(Application.category == status)
+        if status == "INTERVIEW_OR_SCREENING":
+            query = query.filter(Application.category.in_(["INTERVIEW_REQUEST", "SCREENING_REQUEST"]))
+        else:
+            query = query.filter(Application.category == status)
     total = query.count()
     applications = (
         query.order_by(Application.received_date.desc().nulls_last())

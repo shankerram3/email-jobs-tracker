@@ -1,12 +1,14 @@
 """Classification with cache: hash lookup, LLM on miss, persist and normalize company."""
 import json
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from ..models import ClassificationCache, Company
 from ..email_classifier import (
     content_hash,
     structured_classify_email,
     normalize_company_name,
+    apply_category_overrides,
 )
 
 
@@ -41,6 +43,7 @@ def classify_and_cache(
     h = content_hash(subject, sender, body)
     cached = get_cached_classification(db, subject, sender, body)
     if cached is not None:
+        cached = apply_category_overrides(cached, body)
         company = normalize_company_with_db(db, cached["company_name"])
         cached["company_name"] = company
         return cached
@@ -72,16 +75,36 @@ def classify_and_cache(
         raw_json=raw_json,
     )
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Race condition: another thread inserted the same content_hash
+        # Roll back and fetch the existing row
+        db.rollback()
+        existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+        if existing:
+            # Update the existing row with our result
+            existing.category = result["category"]
+            existing.subcategory = result.get("subcategory")
+            existing.company_name = result["company_name"]
+            existing.job_title = result.get("job_title")
+            existing.salary_min = result.get("salary_min")
+            existing.salary_max = result.get("salary_max")
+            existing.location = result.get("location")
+            existing.confidence = result.get("confidence")
+            existing.raw_json = raw_json
+            db.commit()
     return result
 
 
 def persist_llm_result_to_cache(
-    db: Session, subject: str, sender: str, body: str, result: dict
+    db: Session, subject: str, sender: str, body: str, result: dict, commit: bool = True
 ) -> dict:
     """
     Persist an LLM classification result to cache and return result with company normalized.
-    Used after parallel classify_email_llm_only calls.
+    Uses upsert: update existing row by content_hash if present, else insert. Avoids
+    UNIQUE constraint when the same email content is reclassified or appears in a batch twice.
+    When commit=False, caller must commit.
     """
     company = normalize_company_with_db(db, result["company_name"])
     result = {**result, "company_name": company}
@@ -96,20 +119,54 @@ def persist_llm_result_to_cache(
         "location": result.get("location"),
         "confidence": result.get("confidence"),
     })
-    row = ClassificationCache(
-        content_hash=h,
-        category=result["category"],
-        subcategory=result.get("subcategory"),
-        company_name=result["company_name"],
-        job_title=result.get("job_title"),
-        salary_min=result.get("salary_min"),
-        salary_max=result.get("salary_max"),
-        location=result.get("location"),
-        confidence=result.get("confidence"),
-        raw_json=raw_json,
-    )
-    db.add(row)
-    db.commit()
+    existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    if existing:
+        existing.category = result["category"]
+        existing.subcategory = result.get("subcategory")
+        existing.company_name = result["company_name"]
+        existing.job_title = result.get("job_title")
+        existing.salary_min = result.get("salary_min")
+        existing.salary_max = result.get("salary_max")
+        existing.location = result.get("location")
+        existing.confidence = result.get("confidence")
+        existing.raw_json = raw_json
+    else:
+        row = ClassificationCache(
+            content_hash=h,
+            category=result["category"],
+            subcategory=result.get("subcategory"),
+            company_name=result["company_name"],
+            job_title=result.get("job_title"),
+            salary_min=result.get("salary_min"),
+            salary_max=result.get("salary_max"),
+            location=result.get("location"),
+            confidence=result.get("confidence"),
+            raw_json=raw_json,
+        )
+        db.add(row)
+
+    # Flush to detect constraint violations early, even when commit=False
+    try:
+        db.flush()
+    except IntegrityError:
+        # Race condition: another thread inserted between our check and flush
+        db.rollback()
+        # Retry: fetch and update the now-existing row
+        existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+        if existing:
+            existing.category = result["category"]
+            existing.subcategory = result.get("subcategory")
+            existing.company_name = result["company_name"]
+            existing.job_title = result.get("job_title")
+            existing.salary_min = result.get("salary_min")
+            existing.salary_max = result.get("salary_max")
+            existing.location = result.get("location")
+            existing.confidence = result.get("confidence")
+            existing.raw_json = raw_json
+            db.flush()
+
+    if commit:
+        db.commit()
     return result
 
 

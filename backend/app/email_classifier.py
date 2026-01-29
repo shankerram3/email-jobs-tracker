@@ -9,6 +9,7 @@ from .config import settings
 CATEGORIES = {
     "REJECTION",
     "INTERVIEW_REQUEST",
+    "SCREENING_REQUEST",
     "ASSESSMENT",
     "RECRUITER_OUTREACH",
     "APPLICATION_RECEIVED",
@@ -71,6 +72,44 @@ def _regex_salary(text: str) -> tuple[Optional[float], Optional[float]]:
     return (min_val, max_val)
 
 
+def _suggests_interview_request(body: str) -> bool:
+    """True if body clearly indicates recruiter wants to schedule/conduct an interview or call."""
+    text = (body or "").lower()
+    phrases = [
+        r"schedule\s+(?:a\s+)?(?:introductory\s+)?call",
+        r"introductory\s+call",
+        r"dates?\s+and\s+times?\s+(?:that\s+)?(?:work|(?:you['\u2019]?re\s+)?available)",
+        r"phone\s+call\s+with\s+(?:me|us)",
+        r"take\s+the\s+next\s+step",
+        r"next\s+step\s+in\s+getting\s+to\s+know\s+you",
+        r"get(?:ting)?\s+to\s+know\s+you\s+better",
+        r"(?:would\s+like\s+to\s+)?schedule\s+.*\s+(?:call|interview)",
+        r"available\s+for\s+(?:a\s+)?(?:\d+\s*[-–]\s*\d+\s+)?(?:minute\s+)?(?:phone\s+)?call",
+        r"invit(e|ing)\s+you\s+for\s+(?:an?\s+)?interview",
+    ]
+    return any(re.search(p, text) for p in phrases)
+
+
+def apply_category_overrides(result: dict, body: str) -> dict:
+    """
+    Apply keyword-based overrides so clear interview/screening-scheduling emails are
+    INTERVIEW_REQUEST or SCREENING_REQUEST even when LLM or cache returned something else.
+    """
+    if not result:
+        return result
+    cat = result.get("category")
+    if cat in ("INTERVIEW_REQUEST", "SCREENING_REQUEST"):
+        return result
+    if _suggests_interview_request(body or ""):
+        # Prefer SCREENING_REQUEST for "intro call", "phone call", "15-30 min"; else INTERVIEW_REQUEST
+        text = (body or "").lower()
+        if re.search(r"(?:intro(?:ductory)?\s+call|phone\s+call|15[-–]\s*30\s+min)", text):
+            result = {**result, "category": "SCREENING_REQUEST"}
+        else:
+            result = {**result, "category": "INTERVIEW_REQUEST"}
+    return result
+
+
 def _regex_job_title(subject: str, body: str) -> Optional[str]:
     """Extract job title from subject/body with regex."""
     text = f"{subject or ''} {body or ''}"[:1500]
@@ -98,8 +137,18 @@ def structured_classify_email(subject: str, body: str, sender: str) -> dict:
     body_sample = (body or "")[:2000]
     prompt = f"""Classify this job application email and extract structured data.
 
+Category definitions (pick the best match):
+- INTERVIEW_REQUEST: Recruiter/company wants to schedule or conduct a full interview (e.g. onsite, panel, technical round).
+- SCREENING_REQUEST: Recruiter/company wants to schedule a screening call (phone screen, intro call, "15-30 min call", "get to know you", "dates and times that work"). Use for initial recruiter calls before a full interview.
+- APPLICATION_RECEIVED: Automated or brief confirmation that your application was received (no interview scheduling).
+- RECRUITER_OUTREACH: Unsolicited outreach about a role (you didn't apply yet).
+- ASSESSMENT: Coding test, take-home, or assessment invite.
+- REJECTION: You are not moving forward / not selected.
+- OFFER: Job offer or compensation discussion.
+- OTHER: None of the above.
+
 Return a JSON object with exactly these keys (use null for unknown):
-- category: one of REJECTION, INTERVIEW_REQUEST, ASSESSMENT, RECRUITER_OUTREACH, APPLICATION_RECEIVED, OFFER, OTHER
+- category: one of REJECTION, INTERVIEW_REQUEST, SCREENING_REQUEST, ASSESSMENT, RECRUITER_OUTREACH, APPLICATION_RECEIVED, OFFER, OTHER
 - subcategory: optional string (e.g. "phone_screen", "onsite")
 - company_name: string company name or "Unknown"
 - job_title: string job title or null
@@ -157,7 +206,7 @@ Return ONLY valid JSON, no other text."""
     if not job_title:
         job_title = _regex_job_title(subject or "", body or "")
 
-    return {
+    result = {
         "category": category,
         "subcategory": subcategory,
         "company_name": company_name or "Unknown",
@@ -167,6 +216,7 @@ Return ONLY valid JSON, no other text."""
         "location": location,
         "confidence": confidence,
     }
+    return apply_category_overrides(result, body)
 
 
 def classify_email_llm_only(subject: str, body: str, sender: str) -> dict:
@@ -234,8 +284,18 @@ def structured_classify_emails_batch(
     combined = "\n\n".join(parts)
     prompt = f"""Classify each of the following job application emails and extract structured data.
 
+Category definitions (pick the best match for each email):
+- INTERVIEW_REQUEST: Recruiter/company wants to schedule or conduct a full interview (onsite, panel, technical round).
+- SCREENING_REQUEST: Recruiter/company wants to schedule a screening call (phone screen, intro call, "15-30 min call", "get to know you", "dates and times that work"). Use for initial recruiter calls before a full interview.
+- APPLICATION_RECEIVED: Automated or brief confirmation that your application was received (no interview scheduling).
+- RECRUITER_OUTREACH: Unsolicited outreach about a role (you didn't apply yet).
+- ASSESSMENT: Coding test, take-home, or assessment invite.
+- REJECTION: You are not moving forward / not selected.
+- OFFER: Job offer or compensation discussion.
+- OTHER: None of the above.
+
 Return a JSON array of objects. Each object must have exactly these keys (use null for unknown):
-- category: one of REJECTION, INTERVIEW_REQUEST, ASSESSMENT, RECRUITER_OUTREACH, APPLICATION_RECEIVED, OFFER, OTHER
+- category: one of REJECTION, INTERVIEW_REQUEST, SCREENING_REQUEST, ASSESSMENT, RECRUITER_OUTREACH, APPLICATION_RECEIVED, OFFER, OTHER
 - subcategory: optional string (e.g. "phone_screen", "onsite")
 - company_name: string company name or "Unknown"
 - job_title: string job title or null
@@ -266,9 +326,11 @@ Return ONLY a valid JSON array of {len(emails)} objects, no other text."""
         results = []
         for i, data in enumerate(arr):
             if not isinstance(data, dict):
-                results.append(_parse_single_result({}, *emails[i]))
+                r = _parse_single_result({}, *emails[i])
             else:
-                results.append(_parse_single_result(data, *emails[i]))
+                r = _parse_single_result(data, *emails[i])
+            _, body, _ = emails[i]
+            results.append(apply_category_overrides(r, body))
         return results
     except Exception:
         return []

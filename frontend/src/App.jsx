@@ -61,6 +61,9 @@ function LoginPage({ onLogin }) {
 
   useEffect(() => {
     if (urlError === 'access_denied') setError('Sign-in was cancelled or denied.')
+    if (urlError === 'invalid_state' || urlError === 'missing_state') {
+      setError('This sign-in link was used or expired. Please try "Continue with Google" again.')
+    }
   }, [urlError])
 
   const handleSubmit = async (e) => {
@@ -79,38 +82,57 @@ function LoginPage({ onLogin }) {
 
   const googleUrl = API_URL + '/api/auth/google'
 
+  const MailIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+  )
+  const ChromeIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" x2="12" y1="8" y2="12"/><line x1="3.95" x2="6.88" y1="6.06" y2="14"/><line x1="10.88" x2="17.05" y1="21.94" y2="14"/></svg>
+  )
+
   return (
     <div className="login-page">
-      <div className="login-card">
-        <h1>Job Application Tracker</h1>
-        <p className="login-subtitle">Sign in to continue</p>
-        {error && <div className="error-msg">{error}</div>}
-        <a href={googleUrl} className="google-btn">
-          <span className="google-icon">G</span>
-          Sign in with Google
-        </a>
-        <div className="login-divider">or</div>
-        <form onSubmit={handleSubmit}>
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            className="login-input"
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            className="login-input"
-          />
-          <button type="submit" className="login-btn" disabled={loading}>
-            {loading ? 'Signing in…' : 'Sign in with email'}
-          </button>
-        </form>
+      <div className="login-wrap">
+        <div className="login-brand">
+          <div className="login-logo">
+            <MailIcon />
+          </div>
+          <h1>Job Application Tracker</h1>
+          <p className="login-subtitle">Track your job applications from your inbox</p>
+        </div>
+        <div className="login-card">
+          {error && <div className="error-msg">{error}</div>}
+          <a href={googleUrl} className="google-btn">
+            <ChromeIcon />
+            <span>Continue with Google</span>
+          </a>
+          <div className="login-divider"><span>Or continue with email</span></div>
+          <form onSubmit={handleSubmit} className="login-form">
+            <label htmlFor="login-email" className="login-form-label">Email address</label>
+            <input
+              id="login-email"
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              className="login-input"
+            />
+            <label htmlFor="login-password" className="login-form-label">Password</label>
+            <input
+              id="login-password"
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="login-input"
+            />
+            <button type="submit" className="login-btn" disabled={loading}>
+              {loading ? 'Signing in…' : 'Sign in'}
+            </button>
+          </form>
+        </div>
+        <p className="login-footer-note">By signing in, you agree to sync your job application emails</p>
       </div>
     </div>
   )
@@ -156,30 +178,44 @@ function ProfileModal({ user, onClose }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal profile-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Profile</h2>
-        <dl className="profile-dl">
-          <dt>Email</dt>
-          <dd>{user?.email || '—'}</dd>
+        <div className="profile-modal-header">
+          <div className="profile-modal-header-left">
+            <div className="profile-modal-icon-wrap">
+              <IconUser />
+            </div>
+            <h2>Profile</h2>
+          </div>
+          <button type="button" className="profile-modal-close" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+
+        <div className="profile-info-block">
+          <div className="profile-info-row">
+            <span className="profile-info-label">Email</span>
+            <span className="profile-info-value">{user?.email || '—'}</span>
+          </div>
           {user?.name && (
-            <>
-              <dt>Name</dt>
-              <dd>{user.name}</dd>
-            </>
+            <div className="profile-info-row">
+              <span className="profile-info-label">Name</span>
+              <span className="profile-info-value">{user.name}</span>
+            </div>
           )}
-        </dl>
+        </div>
+
         {user?.has_password && (
           <div className="profile-change-password">
-            <h3>Change password</h3>
+            <h3 className="profile-change-password-title">Change password</h3>
             {error && <div className="error-msg">{error}</div>}
             {success && <div className="success-msg">{success}</div>}
-            <form onSubmit={handleChangePassword}>
+            <form onSubmit={handleChangePassword} className="profile-change-password-form">
               <input
                 type="password"
                 placeholder="Current password"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 required
-                className="login-input"
+                className="login-input profile-input"
                 autoComplete="current-password"
               />
               <input
@@ -189,7 +225,7 @@ function ProfileModal({ user, onClose }) {
                 onChange={(e) => setNewPassword(e.target.value)}
                 required
                 minLength={6}
-                className="login-input"
+                className="login-input profile-input"
                 autoComplete="new-password"
               />
               <input
@@ -198,27 +234,40 @@ function ProfileModal({ user, onClose }) {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
-                className="login-input"
+                className="login-input profile-input"
                 autoComplete="new-password"
               />
-              <button type="submit" className="login-btn" disabled={loading}>
+              <button type="submit" className="login-btn profile-submit-btn" disabled={loading}>
                 {loading ? 'Updating…' : 'Update password'}
               </button>
             </form>
           </div>
         )}
         {user && !user.has_password && (
-          <p className="profile-google-only">Signed in with Google. Password change is not available for this account.</p>
+          <p className="profile-google-only">
+            Signed in with Google. Password change is not available for this account.
+          </p>
         )}
-        <div className="modal-actions" style={{ marginTop: '1rem' }}>
-          <button className="filter-btn" onClick={onClose}>Close</button>
+
+        <div className="profile-modal-actions">
+          <button type="button" className="filter-btn profile-close-btn" onClick={onClose}>
+            Close
+          </button>
         </div>
       </div>
     </div>
   )
 }
 
+const IconDashboard = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+const IconBriefcase = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="14" x="2" y="7" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+const IconBarChart = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/></svg>
+const IconUser = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+const IconLogOut = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+const IconMail = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+
 function TrackerApp({ logout, user }) {
+  const [view, setView] = useState('dashboard')
   const [stats, setStats] = useState(null)
   const [showProfile, setShowProfile] = useState(false)
   const [applications, setApplications] = useState([])
@@ -229,11 +278,12 @@ function TrackerApp({ logout, user }) {
   const [syncing, setSyncing] = useState(false)
   const [syncMode, setSyncMode] = useState('auto')
   const [syncFromDate, setSyncFromDate] = useState('')
+  const [syncToDate, setSyncToDate] = useState('')
   const [syncProgress, setSyncProgress] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
   const [analytics, setAnalytics] = useState({ funnel: null, responseRate: null, timeToEvent: null, prediction: null })
-  const [showAnalytics, setShowAnalytics] = useState(false)
+  const [showAnalytics, setShowAnalytics] = useState(true)
   const [selectedApp, setSelectedApp] = useState(null)
   const eventSourceRef = useRef(null)
 
@@ -296,6 +346,7 @@ function TrackerApp({ logout, user }) {
     try {
       const params = new URLSearchParams({ mode: syncMode })
       if (syncFromDate) params.set('after_date', syncFromDate)
+      if (syncToDate) params.set('before_date', syncToDate)
       await api().post(`/api/sync-emails?${params.toString()}`)
       const t = localStorage.getItem('token')
       const es = new EventSource(`${API_URL}/api/sync-events${t ? `?token=${encodeURIComponent(t)}` : ''}`)
@@ -351,75 +402,119 @@ function TrackerApp({ logout, user }) {
 
   if (loading && !stats) {
     return (
-      <div className="app">
-        <div className="loading">Loading…</div>
+      <div className="app-layout">
+        <aside className="app-sidebar">
+          <div className="app-sidebar-header">
+            <div className="app-sidebar-logo">
+              <div className="app-sidebar-logo-icon"><IconMail /></div>
+              <div className="app-sidebar-logo-text">
+                <h1>Job Tracker</h1>
+                <p>Track your applications</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <main className="app-main">
+          <div className="loading">Loading…</div>
+        </main>
       </div>
     )
   }
 
   const chartData = stats
-    ? [
-        { name: 'Applied', count: stats.total_applications },
-        { name: 'Interviews', count: stats.interviews },
-        { name: 'Assessments', count: stats.assessments },
-        { name: 'Rejections', count: stats.rejections },
-        { name: 'Offers', count: stats.offers },
-      ]
+    ? (() => {
+        const total = stats.total_applications || 0
+        const raw = [
+          { name: 'Applied', count: stats.total_applications },
+          { name: 'Interviews', count: stats.interviews },
+          { name: 'Screening', count: stats.screening_requests ?? 0 },
+          { name: 'Assessments', count: stats.assessments },
+          { name: 'Rejections', count: stats.rejections },
+          { name: 'Offers', count: stats.offers },
+        ]
+        return raw.map((d) => ({
+          ...d,
+          pct: total > 0 ? Math.round((d.count / total) * 1000) / 10 : 0,
+        }))
+      })()
     : []
 
+  const recentApplications = applications.slice(0, 5)
+
+  const navItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: IconDashboard },
+    { id: 'applications', label: 'Applications', icon: IconBriefcase },
+    { id: 'analytics', label: 'Analytics', icon: IconBarChart },
+  ]
+
   return (
-    <div className="app">
-      <header>
-        <h1>Job Application Tracker</h1>
-        <div className="header-actions">
-          <button className="filter-btn" onClick={() => setShowProfile(true)} title="Profile">
+    <div className="app-layout">
+      <aside className="app-sidebar">
+        <div className="app-sidebar-header">
+          <div className="app-sidebar-logo">
+            <div className="app-sidebar-logo-icon"><IconMail /></div>
+            <div className="app-sidebar-logo-text">
+              <h1>Job Tracker</h1>
+              <p>Track your applications</p>
+            </div>
+          </div>
+        </div>
+        <nav className="app-sidebar-nav">
+          {navItems.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              className={`app-sidebar-nav-btn ${view === id ? 'active' : ''}`}
+              onClick={() => { setView(id); if (id === 'analytics' && !analytics.funnel) fetchAnalytics(); }}
+            >
+              <Icon />
+              {label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="app-sidebar-nav-btn"
+            onClick={() => setShowProfile(true)}
+          >
+            <IconUser />
             Profile
           </button>
-          <button className="filter-btn" onClick={logout} title="Sign out">
+        </nav>
+        <div className="app-sidebar-user">
+          <div className="app-sidebar-user-info">
+            <div className="app-sidebar-user-avatar"><IconUser /></div>
+            <div className="app-sidebar-user-details">
+              <p className="app-sidebar-user-name">{user?.name || user?.email || 'User'}</p>
+              <p className="app-sidebar-user-email">{user?.email}</p>
+            </div>
+          </div>
+          <button type="button" className="app-sidebar-signout" onClick={logout}>
+            <IconLogOut />
             Sign out
           </button>
-          <select
-            className="sync-mode-select"
-            value={syncMode}
-            onChange={(e) => setSyncMode(e.target.value)}
-            disabled={syncing}
-          >
-            <option value="auto">Auto (full once, then incremental)</option>
-            <option value="full">Full sync</option>
-            <option value="incremental">Incremental only</option>
-          </select>
-          <input
-            type="date"
-            className="sync-from-date"
-            value={syncFromDate}
-            onChange={(e) => setSyncFromDate(e.target.value)}
-            disabled={syncing}
-            title="Sync from date (optional, for full sync)"
-          />
-          <button
-            className="sync-btn"
-            onClick={syncEmails}
-            disabled={syncing}
-          >
-            {syncing ? 'Syncing…' : 'Sync Emails'}
-          </button>
         </div>
-      </header>
+      </aside>
 
-      {error && (
-        <div className="error-msg">
-          {error}
-          {error.toLowerCase().includes('gmail') && error.toLowerCase().includes('auth') && (
-            <div style={{ marginTop: '0.5rem' }}>
-              <a href={`${API_URL}/api/gmail/auth`} className="link-btn" style={{ color: 'var(--accent)' }}>
-                Authorize Gmail in browser →
-              </a>
-            </div>
-          )}
+      <main className="app-main">
+        <div className="app-main-header">
+          <h1>{view === 'dashboard' ? 'Dashboard' : view === 'applications' ? 'Applications' : 'Analytics'}</h1>
+          <p>{view === 'dashboard' ? 'Overview of your job applications' : view === 'applications' ? 'Browse and filter your applications' : 'Funnel, response rates and predictions'}</p>
         </div>
-      )}
 
-      {syncing && syncProgress && (
+        {error && (
+          <div className="error-msg">
+            {error}
+            {error.toLowerCase().includes('gmail') && error.toLowerCase().includes('auth') && (
+              <div style={{ marginTop: '0.5rem' }}>
+                <a href={`${API_URL}/api/gmail/auth`} className="link-btn" style={{ color: 'var(--accent)' }}>
+                  Authorize Gmail in browser →
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
+        {syncing && syncProgress && (
         <div className="sync-progress">
           <div className="sync-progress-header">
             <span className="sync-progress-message">{syncProgress.message}</span>
@@ -446,49 +541,190 @@ function TrackerApp({ logout, user }) {
             </div>
           )}
         </div>
-      )}
+        )}
 
-      {stats && (
-        <>
+        {view === 'dashboard' && (
+          <>
+            <div className="header-actions" style={{ marginBottom: '1.5rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+              <select
+                className="sync-mode-select"
+                value={syncMode}
+                onChange={(e) => setSyncMode(e.target.value)}
+                disabled={syncing}
+              >
+                <option value="auto">Auto (full once, then incremental)</option>
+                <option value="full">Full sync</option>
+                <option value="incremental">Incremental only</option>
+              </select>
+              <label htmlFor="sync-from-date" className="sync-date-label">From</label>
+              <input
+                id="sync-from-date"
+                type="date"
+                className="sync-from-date"
+                value={syncFromDate}
+                onChange={(e) => setSyncFromDate(e.target.value)}
+                disabled={syncing}
+              />
+              <span className="sync-date-sep">–</span>
+              <label htmlFor="sync-to-date" className="sync-date-label">To</label>
+              <input
+                id="sync-to-date"
+                type="date"
+                className="sync-to-date"
+                value={syncToDate}
+                onChange={(e) => setSyncToDate(e.target.value)}
+                disabled={syncing}
+              />
+              <button className="sync-btn" onClick={syncEmails} disabled={syncing}>
+                {syncing ? 'Syncing…' : 'Sync Emails'}
+              </button>
+            </div>
+            {stats && (
+        <section className="dashboard-section" aria-label="Overview">
           <div className="stats-grid">
-            <StatCard label="Total Applications" value={stats.total_applications} />
-            <StatCard label="Interviews" value={stats.interviews} color="green" />
-            <StatCard label="Assessments" value={stats.assessments} color="blue" />
-            <StatCard label="Rejections" value={stats.rejections} color="red" />
-            <StatCard label="Offers" value={stats.offers} color="amber" />
+            <StatCard
+              label="Total Applications"
+              value={stats.total_applications}
+              onClick={() => { setView('applications'); setFilter('ALL'); setOffset(0); }}
+              active={filter === 'ALL'}
+            />
+            <StatCard
+              label="Interviews"
+              value={stats.interviews}
+              color="green"
+              onClick={() => { setView('applications'); setFilter('INTERVIEW_REQUEST'); setOffset(0); }}
+              active={filter === 'INTERVIEW_REQUEST'}
+            />
+            <StatCard
+              label="Screening"
+              value={stats.screening_requests ?? 0}
+              color="green"
+              onClick={() => { setView('applications'); setFilter('SCREENING_REQUEST'); setOffset(0); }}
+              active={filter === 'SCREENING_REQUEST'}
+            />
+            <StatCard
+              label="Assessments"
+              value={stats.assessments}
+              color="purple"
+              onClick={() => { setView('applications'); setFilter('ASSESSMENT'); setOffset(0); }}
+              active={filter === 'ASSESSMENT'}
+            />
+            <StatCard
+              label="Rejections"
+              value={stats.rejections}
+              color="red"
+              onClick={() => { setView('applications'); setFilter('REJECTION'); setOffset(0); }}
+              active={filter === 'REJECTION'}
+            />
+            <StatCard
+              label="Offers"
+              value={stats.offers}
+              color="amber"
+              onClick={() => { setView('applications'); setFilter('OFFER'); setOffset(0); }}
+              active={filter === 'OFFER'}
+            />
           </div>
 
           <div className="chart">
-            <h2>Application breakdown</h2>
+            <h2>Application breakdown (normalized %)</h2>
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={chartData} margin={{ top: 8, right: 8, left: 8, bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={12} />
-                <YAxis stroke="var(--text-muted)" fontSize={12} />
+                <YAxis
+                  stroke="var(--text-muted)"
+                  fontSize={12}
+                  domain={[0, 100]}
+                  tickFormatter={(v) => `${v}%`}
+                />
                 <Tooltip
                   contentStyle={{
                     background: 'var(--surface)',
                     border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius)',
+                    borderRadius: 'var(--radius-lg)',
+                    padding: 'var(--space-3) var(--space-4)',
                   }}
                   labelStyle={{ color: 'var(--text)' }}
+                  formatter={(value, name, props) => [`${props.payload.count} (${value}%)`, props.payload.name]}
+                  labelFormatter={() => ''}
                 />
                 <Legend />
-                <Bar dataKey="count" fill="var(--accent)" radius={[4, 4, 0, 0]} />
+                <Bar
+                  dataKey="pct"
+                  fill="var(--accent)"
+                  radius={[4, 4, 0, 0]}
+                  name="% of total"
+                  onClick={(data) => {
+                    const category = NAME_TO_CATEGORY[data.name]
+                    if (category != null) {
+                      setView('applications')
+                      setFilter(category)
+                      setOffset(0)
+                    }
+                  }}
+                  cursor="pointer"
+                />
               </BarChart>
             </ResponsiveContainer>
           </div>
-        </>
-      )}
 
-      <div className="analytics-section">
-        <button
-          className="filter-btn"
-          onClick={() => { setShowAnalytics(!showAnalytics); if (!analytics.funnel) fetchAnalytics(); }}
-        >
-          {showAnalytics ? 'Hide' : 'Show'} Analytics
-        </button>
-        {showAnalytics && analytics.funnel && (
+          <section className="recent-applications" aria-label="Recent applications">
+            <div className="recent-applications-header">
+              <h2>Recent Applications</h2>
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => setView('applications')}
+              >
+                View all
+              </button>
+            </div>
+            <div className="recent-applications-list">
+              {recentApplications.length === 0 ? (
+                <p className="recent-applications-empty">No applications yet. Sync emails to load applications.</p>
+              ) : (
+                recentApplications.map((app) => (
+                  <button
+                    key={app.id}
+                    type="button"
+                    className="recent-applications-item"
+                    onClick={() => setSelectedApp(app)}
+                  >
+                    <div className="recent-applications-main">
+                      <div className="recent-applications-title">
+                        {app.job_title || app.position || 'Untitled role'}
+                      </div>
+                      <div className="recent-applications-meta">
+                        {app.company_name}
+                        {app.location ? ` · ${app.location}` : ''}
+                      </div>
+                      <span className={`badge ${(app.category || 'other').toLowerCase().replace(/_/g, '-')}`}>
+                        {categoryLabel(app.category)}
+                      </span>
+                    </div>
+                    <div className="recent-applications-side">
+                      <div className="recent-applications-date">
+                        {app.received_date
+                          ? new Date(app.received_date).toLocaleDateString()
+                          : '—'}
+                      </div>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
+        </section>
+            )}
+          </>
+        )}
+
+        {view === 'analytics' && (
+          <div className="analytics-section">
+            {!analytics.funnel && (
+              <button className="filter-btn" onClick={() => fetchAnalytics()}>Load Analytics</button>
+            )}
+            {analytics.funnel && (
           <div className="analytics-panels">
             <div className="analytics-panel">
               <h3>Funnel</h3>
@@ -509,7 +745,7 @@ function TrackerApp({ logout, user }) {
             <div className="analytics-panel">
               <h3>Time to event</h3>
               <p>Rejection: median {analytics.timeToEvent?.rejection?.median_days ?? '—'} days, avg {analytics.timeToEvent?.rejection?.avg_days ?? '—'} (n={analytics.timeToEvent?.rejection?.sample_size ?? 0})</p>
-              <p>Interview: median {analytics.timeToEvent?.interview?.median_days ?? '—'} days, avg {analytics.timeToEvent?.interview?.avg_days ?? '—'} (n={analytics.timeToEvent?.interview?.sample_size ?? 0})</p>
+              <p>Interview / screening: median {analytics.timeToEvent?.interview?.median_days ?? '—'} days, avg {analytics.timeToEvent?.interview?.avg_days ?? '—'} (n={analytics.timeToEvent?.interview?.sample_size ?? 0})</p>
             </div>
             <div className="analytics-panel">
               <h3>Success prediction (MVP)</h3>
@@ -520,9 +756,12 @@ function TrackerApp({ logout, user }) {
               </ul>
             </div>
           </div>
+            )}
+          </div>
         )}
-      </div>
 
+        {view === 'applications' && (
+          <>
       <div className="filters">
         <button
           className={`filter-btn ${filter === 'ALL' ? 'active' : ''}`}
@@ -531,10 +770,16 @@ function TrackerApp({ logout, user }) {
           All
         </button>
         <button
-          className={`filter-btn ${filter === 'INTERVIEW_REQUEST' ? 'active' : ''}`}
-          onClick={() => setFilter('INTERVIEW_REQUEST')}
+          className={`filter-btn ${filter === 'INTERVIEW_OR_SCREENING' ? 'active' : ''}`}
+          onClick={() => setFilter('INTERVIEW_OR_SCREENING')}
         >
-          Interviews
+          Interview / screening
+        </button>
+        <button
+          className={`filter-btn ${filter === 'SCREENING_REQUEST' ? 'active' : ''}`}
+          onClick={() => setFilter('SCREENING_REQUEST')}
+        >
+          Screening
         </button>
         <button
           className={`filter-btn ${filter === 'ASSESSMENT' ? 'active' : ''}`}
@@ -556,7 +801,7 @@ function TrackerApp({ logout, user }) {
         </button>
       </div>
 
-      <div className="applications-list">
+      <section className="applications-list" aria-label="Applications">
         <h2>Applications</h2>
         <div className="pagination-bar">
           <button
@@ -585,7 +830,7 @@ function TrackerApp({ logout, user }) {
                 <th>Job title</th>
                 <th>Location</th>
                 <th>Status</th>
-                <th>Date</th>
+                <th>Date & time</th>
                 <th></th>
               </tr>
             </thead>
@@ -603,13 +848,13 @@ function TrackerApp({ logout, user }) {
                     <td>{app.job_title || app.position || '—'}</td>
                     <td>{app.location || '—'}</td>
                     <td>
-                      <span className={`badge ${(app.category || 'other').toLowerCase()}`}>
-                        {app.category || 'Other'}
+                      <span className={`badge ${(app.category || 'other').toLowerCase().replace(/_/g, '-')}`}>
+                        {categoryLabel(app.category)}
                       </span>
                     </td>
                     <td>
                       {app.received_date
-                        ? new Date(app.received_date).toLocaleDateString()
+                        ? new Date(app.received_date).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
                         : '—'}
                     </td>
                     <td>
@@ -626,11 +871,15 @@ function TrackerApp({ logout, user }) {
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
+          </>
+        )}
+
+      </main>
 
       {selectedApp && (
         <div className="modal-overlay" onClick={() => setSelectedApp(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal modal-details" onClick={(e) => e.stopPropagation()}>
             <h2>Application details</h2>
             <dl>
               <dt>Company</dt><dd>{selectedApp.company_name}</dd>
@@ -639,9 +888,24 @@ function TrackerApp({ logout, user }) {
               <dt>Salary</dt><dd>{selectedApp.salary_min != null || selectedApp.salary_max != null
                 ? [selectedApp.salary_min, selectedApp.salary_max].filter(Boolean).map((n) => `$${n}`).join(' – ')
                 : '—'}</dd>
-              <dt>Category</dt><dd>{selectedApp.category}</dd>
-              <dt>Subject</dt><dd>{selectedApp.email_subject}</dd>
+              <dt>Category</dt><dd>{categoryLabel(selectedApp.category)}</dd>
+            </dl>
+            <h3 className="modal-email-heading">Email</h3>
+            <dl>
+              <dt>Subject</dt><dd>{selectedApp.email_subject || '—'}</dd>
+              <dt>From</dt><dd>{selectedApp.email_from || '—'}</dd>
               <dt>Received</dt><dd>{selectedApp.received_date ? new Date(selectedApp.received_date).toLocaleString() : '—'}</dd>
+              <dt>Body</dt>
+              <dd className="email-body-wrap">
+                {selectedApp.email_body ? (
+                  <div
+                    className="email-body email-body-html"
+                    dangerouslySetInnerHTML={{ __html: selectedApp.email_body }}
+                  />
+                ) : (
+                  '—'
+                )}
+              </dd>
             </dl>
             <div className="modal-actions">
               <button className="filter-btn" onClick={() => api().post(`/api/applications/${selectedApp.id}/schedule`, {}).then(() => setSelectedApp(null))}>
@@ -666,13 +930,45 @@ function TrackerApp({ logout, user }) {
   )
 }
 
-function StatCard({ label, value, color = 'blue' }) {
-  return (
-    <div className={`stat-card ${color}`}>
+const NAME_TO_CATEGORY = {
+  'Applied': 'ALL',
+  'Interviews': 'INTERVIEW_REQUEST',
+  'Screening': 'SCREENING_REQUEST',
+  'Assessments': 'ASSESSMENT',
+  'Rejections': 'REJECTION',
+  'Offers': 'OFFER',
+}
+
+function categoryLabel(cat) {
+  if (!cat) return 'Other'
+  const labels = {
+    INTERVIEW_REQUEST: 'Interview',
+    SCREENING_REQUEST: 'Screening',
+    ASSESSMENT: 'Assessment',
+    REJECTION: 'Rejection',
+    OFFER: 'Offer',
+    APPLICATION_RECEIVED: 'Application received',
+    RECRUITER_OUTREACH: 'Recruiter outreach',
+  }
+  return labels[cat] || cat.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function StatCard({ label, value, color = 'blue', onClick, active }) {
+  const content = (
+    <>
       <h3>{label}</h3>
       <div className="value">{value}</div>
-    </div>
+    </>
   )
+  const classes = `stat-card ${onClick ? 'stat-card-clickable ' : ''}${color}${active ? ' active' : ''}`
+  if (onClick) {
+    return (
+      <button type="button" className={classes} onClick={onClick} title={`Show ${label}`}>
+        {content}
+      </button>
+    )
+  }
+  return <div className={classes}>{content}</div>
 }
 
 function App() {

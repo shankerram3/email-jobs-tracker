@@ -31,7 +31,7 @@ from .classification_service import (
     persist_llm_result_to_cache,
     normalize_company_with_db,
 )
-from ..email_classifier import classify_email_llm_only, structured_classify_emails_batch
+from ..email_classifier import classify_email_llm_only, structured_classify_emails_batch, apply_category_overrides
 
 LAST_SYNCED_AT_KEY = "last_synced_at"
 DUPLICATE_DAYS_WINDOW = 14
@@ -79,7 +79,7 @@ def _set_transition_timestamps(app: Application, received: Optional[datetime], c
     app.applied_at = app.applied_at or received
     if category == "REJECTION":
         app.rejected_at = app.rejected_at or received
-    elif category in ("INTERVIEW_REQUEST", "ASSESSMENT"):
+    elif category in ("INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT"):
         app.interview_at = app.interview_at or received
     elif category == "OFFER":
         app.offer_at = app.offer_at or received
@@ -97,6 +97,9 @@ def _parse_received(received_iso: Optional[str]) -> Optional[datetime]:
         return None
 
 
+BATCH_COMMIT_SIZE = 50
+
+
 def _create_application_and_log(
     db: Session,
     mid: str,
@@ -106,6 +109,7 @@ def _create_application_and_log(
     sender: str,
     body: Optional[str],
     received: Optional[datetime],
+    commit: bool = True,
 ) -> None:
     category = structured.get("category") or "OTHER"
     job_title = structured.get("job_title")
@@ -132,11 +136,12 @@ def _create_application_and_log(
     _set_transition_timestamps(app, received, category)
     db.add(app)
     db.add(EmailLog(gmail_message_id=mid, user_id=user_id, classification=category))
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def _format_after_date(value: str) -> Optional[str]:
-    """Normalize date string to YYYY/MM/DD for Gmail after: query."""
+def _format_date(value: str) -> Optional[str]:
+    """Normalize date string to YYYY/MM/DD for Gmail after:/before: queries."""
     value = (value or "").strip()
     if not value:
         return None
@@ -153,6 +158,7 @@ def run_sync_with_options(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     user_id: Optional[int] = None,
     after_date: Optional[str] = None,
+    before_date: Optional[str] = None,
 ) -> dict:
     """
     Run sync for a user.
@@ -160,6 +166,7 @@ def run_sync_with_options(
     mode=incremental: history-based delta; falls back to full if historyId missing/too old.
     mode=full: always full sync (all matching emails up to limit).
     after_date: optional YYYY-MM-DD or YYYY/MM/DD; when set, used as full-sync "from" date.
+    before_date: optional YYYY-MM-DD or YYYY/MM/DD; when set, used as full-sync "to" date (inclusive).
     Uses classification cache; duplicate detection (company + title + window) per user.
     """
     def progress(processed: int, total: int, message: str):
@@ -215,9 +222,9 @@ def run_sync_with_options(
 
             after_date_val = None
             if after_date:
-                after_date_val = _format_after_date(after_date)
+                after_date_val = _format_date(after_date)
             if not after_date_val and settings.gmail_full_sync_after_date:
-                after_date_val = _format_after_date(settings.gmail_full_sync_after_date)
+                after_date_val = _format_date(settings.gmail_full_sync_after_date)
             if not after_date_val and not settings.gmail_full_sync_ignore_last_synced:
                 # Per-user: use SyncState last_full_sync_at / last_synced_at; else global SyncMetadata
                 if user_id is not None:
@@ -239,22 +246,27 @@ def run_sync_with_options(
             if not after_date_val:
                 after_date_val = _default_after_date()
 
+            before_date_val = _format_date(before_date) if before_date else None
+            date_prefix = f"after:{after_date_val}"
+            if before_date_val:
+                date_prefix += f" before:{before_date_val}"
+
             logger.info(f"=== FULL SYNC DEBUG ===")
-            logger.info(f"Searching emails after: {after_date_val}")
+            logger.info(f"Searching emails after: {after_date_val}" + (f" before: {before_date_val}" if before_date_val else ""))
             logger.info(f"Max results per query: {settings.gmail_full_sync_max_per_query}")
 
             queries = [
                 # Subject-based searches
-                f"after:{after_date_val} subject:(application OR applied OR interview OR assessment OR position OR opportunity OR hiring OR job)",
-                f"after:{after_date_val} subject:(offer OR rejection OR rejected OR regret OR unfortunately OR congratulations)",
-                f"after:{after_date_val} subject:(\"thank you for applying\" OR \"thank you for your interest\" OR \"next steps\" OR \"move forward\")",
+                f"{date_prefix} subject:(application OR applied OR interview OR assessment OR position OR opportunity OR hiring OR job)",
+                f"{date_prefix} subject:(offer OR rejection OR rejected OR regret OR unfortunately OR congratulations)",
+                f"{date_prefix} subject:(\"thank you for applying\" OR \"thank you for your interest\" OR \"next steps\" OR \"move forward\")",
                 # From-based searches
-                f"after:{after_date_val} from:(noreply OR no-reply OR careers OR recruiting OR talent OR jobs OR hr OR hire OR greenhouse OR lever OR workday)",
-                f"after:{after_date_val} from:(linkedin.com OR indeed.com OR glassdoor.com OR ziprecruiter.com OR monster.com)",
+                f"{date_prefix} from:(noreply OR no-reply OR careers OR recruiting OR talent OR jobs OR hr OR hire OR greenhouse OR lever OR workday)",
+                f"{date_prefix} from:(linkedin.com OR indeed.com OR glassdoor.com OR ziprecruiter.com OR monster.com)",
                 # Job board and ATS platforms
-                f"after:{after_date_val} (from:myworkdayjobs.com OR from:greenhouse.io OR from:lever.co OR from:jobvite.com OR from:icims.com)",
+                f"{date_prefix} (from:myworkdayjobs.com OR from:greenhouse.io OR from:lever.co OR from:jobvite.com OR from:icims.com)",
                 # Common job-related phrases
-                f"after:{after_date_val} (\"application received\" OR \"application status\" OR \"interview invitation\" OR \"phone screen\" OR \"technical interview\")",
+                f"{date_prefix} (\"application received\" OR \"application status\" OR \"interview invitation\" OR \"phone screen\" OR \"technical interview\")",
             ]
 
             logger.info(f"Running {len(queries)} Gmail queries...")
@@ -290,6 +302,7 @@ def run_sync_with_options(
     errors = 0
     skipped_existing = 0
     skipped_duplicate = 0
+    pending_commits = 0
 
     # Phase 1: parse, check existing, check cache; collect pending (cache misses) for LLM
     PendingItem = Tuple[int, str, str, str, str, str]  # (idx, mid, subject, sender, body, received_iso)
@@ -319,6 +332,7 @@ def run_sync_with_options(
 
         cached = get_cached_classification(db, subject, sender, body)
         if cached is not None:
+            cached = apply_category_overrides(cached, body)
             company = normalize_company_with_db(db, cached["company_name"])
             cached = {**cached, "company_name": company}
             received = _parse_received(received_iso)
@@ -330,9 +344,13 @@ def run_sync_with_options(
                 skipped_duplicate += 1
             else:
                 _create_application_and_log(
-                    db, mid, user_id, cached, subject, sender, body, received
+                    db, mid, user_id, cached, subject, sender, body, received, commit=False
                 )
                 created += 1
+                pending_commits += 1
+                if pending_commits >= BATCH_COMMIT_SIZE:
+                    db.commit()
+                    pending_commits = 0
             progress(i + 1, total, "Classifying…")
             continue
 
@@ -390,7 +408,7 @@ def run_sync_with_options(
             continue
 
         try:
-            structured = persist_llm_result_to_cache(db, subject, sender, body, result)
+            structured = persist_llm_result_to_cache(db, subject, sender, body, result, commit=False)
         except Exception as e:
             logger.error(f"Email {idx+1}/{total}: Cache persist failed - {str(e)[:100]}")
             db.add(EmailLog(gmail_message_id=mid, user_id=user_id, error=str(e), classification=None))
@@ -409,8 +427,15 @@ def run_sync_with_options(
 
         category = structured.get("category") or "OTHER"
         logger.info(f"Email {idx+1}/{total}: CREATING (msg_id={mid}, category={category})")
-        _create_application_and_log(db, mid, user_id, structured, subject, sender, body, received)
+        _create_application_and_log(db, mid, user_id, structured, subject, sender, body, received, commit=False)
         created += 1
+        pending_commits += 1
+        if pending_commits >= BATCH_COMMIT_SIZE:
+            db.commit()
+            pending_commits = 0
+
+    if pending_commits > 0:
+        db.commit()
 
     now = datetime.utcnow()
     if new_history_id:

@@ -18,11 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .config import settings
-
-# CSRF state for OAuth when gmail_oauth_redirect_uri is set: state -> {redirect_url, created_at}
-_oauth_state_store: dict[str, dict] = {}
-_oauth_state_lock = __import__("threading").Lock()
-OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
+from .oauth_state_db import KIND_GMAIL, oauth_state_set, oauth_state_consume
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -68,15 +64,6 @@ def _gmail_creds_ready_for_background() -> bool:
     return False
 
 
-def _clean_oauth_states():
-    """Remove expired state entries."""
-    now = time.time()
-    with _oauth_state_lock:
-        expired = [s for s, v in _oauth_state_store.items() if now - v.get("created_at", 0) > OAUTH_STATE_TTL_SECONDS]
-        for s in expired:
-            _oauth_state_store.pop(s, None)
-
-
 def start_gmail_oauth(redirect_url_after: str) -> str:
     """
     Start OAuth with CSRF state. Use when gmail_oauth_redirect_uri is set.
@@ -93,9 +80,7 @@ def start_gmail_oauth(redirect_url_after: str) -> str:
     if not redirect_uri:
         raise ValueError("GMAIL_OAUTH_REDIRECT_URI must be set to use start_gmail_oauth")
     state = secrets.token_urlsafe(32)
-    with _oauth_state_lock:
-        _oauth_state_store[state] = {"redirect_url": redirect_url_after, "created_at": time.time()}
-    _clean_oauth_states()
+    oauth_state_set(KIND_GMAIL, state, redirect_url_after)
     flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES, redirect_uri=redirect_uri)
     auth_url, _ = flow.authorization_url(prompt="consent", state=state, access_type="offline")
     return auth_url
@@ -106,9 +91,7 @@ def finish_gmail_oauth(code: str, state: str) -> str:
     Validate state and exchange code for tokens. Returns redirect_url to send the user to.
     Raises ValueError if state is invalid or expired.
     """
-    _clean_oauth_states()
-    with _oauth_state_lock:
-        entry = _oauth_state_store.pop(state, None)
+    entry = oauth_state_consume(state)
     if not entry:
         raise ValueError("Invalid or expired OAuth state")
     redirect_url = entry.get("redirect_url", "http://localhost:5173")

@@ -10,10 +10,11 @@ from .services.email_processor import run_sync_with_options
 
 
 @shared_task(bind=True, name="app.tasks.run_email_sync")
-def run_email_sync(self, mode: str = "incremental", after_date: Optional[str] = None):
+def run_email_sync(self, mode: str = "incremental", after_date: Optional[str] = None, before_date: Optional[str] = None):
     """
     Run email sync. mode: incremental | full.
     after_date: optional YYYY-MM-DD or YYYY/MM/DD for full sync "from" date.
+    before_date: optional YYYY-MM-DD or YYYY/MM/DD for full sync "to" date.
     Uses DB session per task; updates sync_state in DB for resilience to restarts.
     """
     db = SessionLocal()
@@ -21,7 +22,7 @@ def run_email_sync(self, mode: str = "incremental", after_date: Optional[str] = 
         set_sync_state_syncing(db)
         progress_callback = None  # Celery task can't push to SSE; progress stored in sync_state
         result = run_sync_with_options(
-            db, mode=mode, on_progress=progress_callback, after_date=after_date
+            db, mode=mode, on_progress=progress_callback, after_date=after_date, before_date=before_date
         )
         if result.get("error"):
             set_sync_state_error(db, result["error"])

@@ -70,8 +70,17 @@ async def get_current_user(
     api_key: Optional[str] = Depends(api_key_header),
 ) -> Optional[User]:
     """Validate JWT or API key. Returns User or None if auth disabled."""
-    # API key: map to first user (backward compat)
+    # API key: map to configured user or first user (backward compat)
     if settings.api_key and api_key and api_key == settings.api_key:
+        if settings.api_key_user_id is not None:
+            user = get_user_by_id(db, settings.api_key_user_id)
+            if user:
+                return user
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key user not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         user = db.query(User).order_by(User.id).first()
         if user:
             return user
