@@ -265,6 +265,32 @@ const IconBarChart = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" he
 const IconUser = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
 const IconLogOut = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
 const IconMail = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+const IconAlertCircle = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+const IconRefresh = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+
+// Confidence Badge Component
+function ConfidenceBadge({ confidence }) {
+  if (confidence == null) return null
+  const pct = Math.round(confidence * 100)
+  let colorClass = 'low'
+  if (pct >= 85) colorClass = 'high'
+  else if (pct >= 70) colorClass = 'medium'
+  return (
+    <span className={`confidence-badge ${colorClass}`} title={`Classification confidence: ${pct}%`}>
+      {pct}%
+    </span>
+  )
+}
+
+// Action Item Component
+function ActionItem({ item }) {
+  return (
+    <li className="action-item">
+      <IconAlertCircle />
+      <span>{item}</span>
+    </li>
+  )
+}
 
 function TrackerApp({ logout, user }) {
   const [view, setView] = useState('dashboard')
@@ -285,6 +311,9 @@ function TrackerApp({ logout, user }) {
   const [analytics, setAnalytics] = useState({ funnel: null, responseRate: null, timeToEvent: null, prediction: null })
   const [showAnalytics, setShowAnalytics] = useState(true)
   const [selectedApp, setSelectedApp] = useState(null)
+  const [actionRequired, setActionRequired] = useState([])
+  const [langgraphAnalytics, setLanggraphAnalytics] = useState(null)
+  const [reprocessing, setReprocessing] = useState(false)
   const eventSourceRef = useRef(null)
 
   const fetchStats = useCallback(async () => {
@@ -330,14 +359,46 @@ function TrackerApp({ logout, user }) {
     }
   }, [])
 
+  const fetchActionRequired = useCallback(async () => {
+    try {
+      const { data } = await api().get('/api/langgraph/action-required?limit=10')
+      setActionRequired(data || [])
+    } catch {
+      setActionRequired([])
+    }
+  }, [])
+
+  const fetchLanggraphAnalytics = useCallback(async () => {
+    try {
+      const { data } = await api().get('/api/langgraph/analytics')
+      setLanggraphAnalytics(data)
+    } catch {
+      setLanggraphAnalytics(null)
+    }
+  }, [])
+
+  const reprocessApplication = async (appId) => {
+    setReprocessing(true)
+    try {
+      const { data } = await api().post(`/api/langgraph/reprocess/${appId}`)
+      setSelectedApp(data)
+      // Refresh lists
+      await Promise.all([fetchApplications(), fetchActionRequired()])
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Reprocess failed')
+    } finally {
+      setReprocessing(false)
+    }
+  }
+
   useEffect(() => {
     const load = async () => {
       setLoading(true)
-      await Promise.all([fetchStats(), fetchApplications()])
+      await Promise.all([fetchStats(), fetchApplications(), fetchActionRequired()])
       setLoading(false)
     }
     load()
-  }, [fetchStats, fetchApplications])
+  }, [fetchStats, fetchApplications, fetchActionRequired])
 
   const syncEmails = async () => {
     setSyncing(true)
@@ -465,7 +526,7 @@ function TrackerApp({ logout, user }) {
               key={id}
               type="button"
               className={`app-sidebar-nav-btn ${view === id ? 'active' : ''}`}
-              onClick={() => { setView(id); if (id === 'analytics' && !analytics.funnel) fetchAnalytics(); }}
+              onClick={() => { setView(id); if (id === 'analytics' && !analytics.funnel) { fetchAnalytics(); fetchLanggraphAnalytics(); } }}
             >
               <Icon />
               {label}
@@ -592,15 +653,15 @@ function TrackerApp({ logout, user }) {
               label="Interviews"
               value={stats.interviews}
               color="green"
-              onClick={() => { setView('applications'); setFilter('INTERVIEW_REQUEST'); setOffset(0); }}
-              active={filter === 'INTERVIEW_REQUEST'}
+              onClick={() => { setView('applications'); setFilter('INTERVIEW_OR_SCREENING'); setOffset(0); }}
+              active={filter === 'INTERVIEW_OR_SCREENING'}
             />
             <StatCard
               label="Screening"
               value={stats.screening_requests ?? 0}
               color="green"
-              onClick={() => { setView('applications'); setFilter('SCREENING_REQUEST'); setOffset(0); }}
-              active={filter === 'SCREENING_REQUEST'}
+              onClick={() => { setView('applications'); setFilter('SCREENING'); setOffset(0); }}
+              active={filter === 'SCREENING'}
             />
             <StatCard
               label="Assessments"
@@ -613,8 +674,8 @@ function TrackerApp({ logout, user }) {
               label="Rejections"
               value={stats.rejections}
               color="red"
-              onClick={() => { setView('applications'); setFilter('REJECTION'); setOffset(0); }}
-              active={filter === 'REJECTION'}
+              onClick={() => { setView('applications'); setFilter('REJECTED'); setOffset(0); }}
+              active={filter === 'REJECTED'}
             />
             <StatCard
               label="Offers"
@@ -668,6 +729,52 @@ function TrackerApp({ logout, user }) {
             </ResponsiveContainer>
           </div>
 
+          {/* Action Required Section */}
+          {actionRequired.length > 0 && (
+            <section className="action-required-section" aria-label="Action required">
+              <div className="action-required-header">
+                <div className="action-required-title">
+                  <IconAlertCircle />
+                  <h2>Action Required</h2>
+                  <span className="action-required-count">{actionRequired.length}</span>
+                </div>
+              </div>
+              <div className="action-required-list">
+                {actionRequired.slice(0, 5).map((app) => (
+                  <button
+                    key={app.id}
+                    type="button"
+                    className="action-required-item"
+                    onClick={() => setSelectedApp(app)}
+                  >
+                    <div className="action-required-main">
+                      <div className="action-required-company">{app.company_name}</div>
+                      <div className="action-required-position">
+                        {app.position || 'Untitled role'}
+                        {app.position_level && <span className="position-level">{app.position_level}</span>}
+                      </div>
+                      <div className="action-required-stage">
+                        <span className={`stage-badge ${(app.application_stage || 'other').toLowerCase()}`}>
+                          {app.application_stage || 'Other'}
+                        </span>
+                        <ConfidenceBadge confidence={app.confidence} />
+                      </div>
+                    </div>
+                    <div className="action-required-actions">
+                      {app.action_items && app.action_items.length > 0 && (
+                        <ul className="action-items-preview">
+                          {app.action_items.slice(0, 2).map((item, i) => (
+                            <li key={i}>{item}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
           <section className="recent-applications" aria-label="Recent applications">
             <div className="recent-applications-header">
               <h2>Recent Applications</h2>
@@ -693,14 +800,20 @@ function TrackerApp({ logout, user }) {
                     <div className="recent-applications-main">
                       <div className="recent-applications-title">
                         {app.job_title || app.position || 'Untitled role'}
+                        {app.requires_action && (
+                          <span className="requires-action-indicator" title="Requires action">!</span>
+                        )}
                       </div>
                       <div className="recent-applications-meta">
                         {app.company_name}
                         {app.location ? ` · ${app.location}` : ''}
                       </div>
-                      <span className={`badge ${(app.category || 'other').toLowerCase().replace(/_/g, '-')}`}>
-                        {categoryLabel(app.category)}
-                      </span>
+                      <div className="recent-applications-badges">
+                        <span className={`badge ${(app.category || 'other').toLowerCase().replace(/_/g, '-')}`}>
+                          {categoryLabel(app.category)}
+                        </span>
+                        <ConfidenceBadge confidence={app.confidence} />
+                      </div>
                     </div>
                     <div className="recent-applications-side">
                       <div className="recent-applications-date">
@@ -721,9 +834,53 @@ function TrackerApp({ logout, user }) {
 
         {view === 'analytics' && (
           <div className="analytics-section">
-            {!analytics.funnel && (
-              <button className="filter-btn" onClick={() => fetchAnalytics()}>Load Analytics</button>
+            {!analytics.funnel && !langgraphAnalytics && (
+              <button className="filter-btn" onClick={() => { fetchAnalytics(); fetchLanggraphAnalytics(); }}>Load Analytics</button>
             )}
+
+            {/* LangGraph Classification Analytics */}
+            {langgraphAnalytics && (
+              <div className="langgraph-analytics">
+                <h2 className="analytics-section-title">AI Classification Analytics</h2>
+                <div className="langgraph-stats-row">
+                  <div className="langgraph-stat">
+                    <div className="langgraph-stat-value">{langgraphAnalytics.total_processed}</div>
+                    <div className="langgraph-stat-label">Total Processed</div>
+                  </div>
+                  <div className="langgraph-stat">
+                    <div className="langgraph-stat-value action">{langgraphAnalytics.action_required_count}</div>
+                    <div className="langgraph-stat-label">Action Required</div>
+                  </div>
+                  <div className="langgraph-stat">
+                    <div className="langgraph-stat-value">{langgraphAnalytics.avg_confidence != null ? `${Math.round(langgraphAnalytics.avg_confidence * 100)}%` : '—'}</div>
+                    <div className="langgraph-stat-label">Avg Confidence</div>
+                  </div>
+                </div>
+
+                <div className="analytics-panels">
+                  <div className="analytics-panel">
+                    <h3>By Category</h3>
+                    <ul className="compact">
+                      {langgraphAnalytics.by_category?.slice(0, 10).map((cat) => (
+                        <li key={cat.category}>
+                          {categoryLabel(cat.category)}: {cat.count}
+                          {cat.avg_confidence != null && <span className="cat-confidence"> ({Math.round(cat.avg_confidence * 100)}%)</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="analytics-panel">
+                    <h3>By Stage</h3>
+                    <ul className="compact">
+                      {Object.entries(langgraphAnalytics.by_stage || {}).map(([stage, count]) => (
+                        <li key={stage}>{stage}: {count}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {analytics.funnel && (
           <div className="analytics-panels">
             <div className="analytics-panel">
@@ -776,8 +933,8 @@ function TrackerApp({ logout, user }) {
           Interview / screening
         </button>
         <button
-          className={`filter-btn ${filter === 'SCREENING_REQUEST' ? 'active' : ''}`}
-          onClick={() => setFilter('SCREENING_REQUEST')}
+          className={`filter-btn ${filter === 'SCREENING' ? 'active' : ''}`}
+          onClick={() => setFilter('SCREENING')}
         >
           Screening
         </button>
@@ -788,8 +945,8 @@ function TrackerApp({ logout, user }) {
           Assessments
         </button>
         <button
-          className={`filter-btn ${filter === 'REJECTION' ? 'active' : ''}`}
-          onClick={() => setFilter('REJECTION')}
+          className={`filter-btn ${filter === 'REJECTED' ? 'active' : ''}`}
+          onClick={() => setFilter('REJECTED')}
         >
           Rejections
         </button>
@@ -828,8 +985,9 @@ function TrackerApp({ logout, user }) {
               <tr>
                 <th>Company</th>
                 <th>Job title</th>
-                <th>Location</th>
-                <th>Status</th>
+                <th>Stage</th>
+                <th>Category</th>
+                <th>Confidence</th>
                 <th>Date & time</th>
                 <th></th>
               </tr>
@@ -837,20 +995,30 @@ function TrackerApp({ logout, user }) {
             <tbody>
               {applications.length === 0 ? (
                 <tr>
-                  <td colSpan={6} style={{ color: 'var(--text-muted)', padding: '2rem' }}>
-                    No applications yet. Click “Sync Emails” to pull from Gmail.
+                  <td colSpan={7} style={{ color: 'var(--text-muted)', padding: '2rem' }}>
+                    No applications yet. Click "Sync Emails" to pull from Gmail.
                   </td>
                 </tr>
               ) : (
                 applications.map((app) => (
-                  <tr key={app.id}>
+                  <tr key={app.id} className={app.requires_action ? 'requires-action-row' : ''}>
                     <td>{app.company_name}</td>
-                    <td>{app.job_title || app.position || '—'}</td>
-                    <td>{app.location || '—'}</td>
+                    <td>
+                      {app.job_title || app.position || '—'}
+                      {app.position_level && <span className="position-level-inline">{app.position_level}</span>}
+                    </td>
+                    <td>
+                      <span className={`stage-badge ${(app.application_stage || 'other').toLowerCase()}`}>
+                        {app.application_stage || 'Other'}
+                      </span>
+                    </td>
                     <td>
                       <span className={`badge ${(app.category || 'other').toLowerCase().replace(/_/g, '-')}`}>
                         {categoryLabel(app.category)}
                       </span>
+                    </td>
+                    <td>
+                      <ConfidenceBadge confidence={app.confidence} />
                     </td>
                     <td>
                       {app.received_date
@@ -880,16 +1048,70 @@ function TrackerApp({ logout, user }) {
       {selectedApp && (
         <div className="modal-overlay" onClick={() => setSelectedApp(null)}>
           <div className="modal modal-details" onClick={(e) => e.stopPropagation()}>
-            <h2>Application details</h2>
+            <div className="modal-header-row">
+              <h2>Application details</h2>
+              {selectedApp.requires_action && (
+                <span className="modal-action-badge">Action Required</span>
+              )}
+            </div>
+
             <dl>
               <dt>Company</dt><dd>{selectedApp.company_name}</dd>
-              <dt>Job title</dt><dd>{selectedApp.job_title || selectedApp.position || '—'}</dd>
+              <dt>Job title</dt><dd>
+                {selectedApp.job_title || selectedApp.position || '—'}
+                {selectedApp.position_level && <span className="position-level-inline">{selectedApp.position_level}</span>}
+              </dd>
               <dt>Location</dt><dd>{selectedApp.location || '—'}</dd>
               <dt>Salary</dt><dd>{selectedApp.salary_min != null || selectedApp.salary_max != null
                 ? [selectedApp.salary_min, selectedApp.salary_max].filter(Boolean).map((n) => `$${n}`).join(' – ')
                 : '—'}</dd>
-              <dt>Category</dt><dd>{categoryLabel(selectedApp.category)}</dd>
             </dl>
+
+            {/* LangGraph Classification Section */}
+            <h3 className="modal-section-heading">Classification</h3>
+            <dl>
+              <dt>Category</dt>
+              <dd>
+                <span className={`badge ${(selectedApp.category || 'other').toLowerCase().replace(/_/g, '-')}`}>
+                  {categoryLabel(selectedApp.category)}
+                </span>
+              </dd>
+              <dt>Stage</dt>
+              <dd>
+                <span className={`stage-badge ${(selectedApp.application_stage || 'other').toLowerCase()}`}>
+                  {selectedApp.application_stage || 'Other'}
+                </span>
+              </dd>
+              <dt>Confidence</dt>
+              <dd>
+                <ConfidenceBadge confidence={selectedApp.confidence} />
+                {selectedApp.confidence != null && (
+                  <span className="confidence-text"> ({Math.round(selectedApp.confidence * 100)}%)</span>
+                )}
+              </dd>
+              {selectedApp.classification_reasoning && (
+                <>
+                  <dt>Reasoning</dt>
+                  <dd className="reasoning-text">{selectedApp.classification_reasoning}</dd>
+                </>
+              )}
+            </dl>
+
+            {/* Action Items Section */}
+            {selectedApp.action_items && selectedApp.action_items.length > 0 && (
+              <>
+                <h3 className="modal-section-heading action-items-heading">
+                  <IconAlertCircle />
+                  Action Items
+                </h3>
+                <ul className="action-items-list">
+                  {selectedApp.action_items.map((item, i) => (
+                    <ActionItem key={i} item={item} />
+                  ))}
+                </ul>
+              </>
+            )}
+
             <h3 className="modal-email-heading">Email</h3>
             <dl>
               <dt>Subject</dt><dd>{selectedApp.email_subject || '—'}</dd>
@@ -908,6 +1130,15 @@ function TrackerApp({ logout, user }) {
               </dd>
             </dl>
             <div className="modal-actions">
+              <button
+                className="filter-btn reprocess-btn"
+                onClick={() => reprocessApplication(selectedApp.id)}
+                disabled={reprocessing}
+                title="Re-run AI classification"
+              >
+                <IconRefresh />
+                {reprocessing ? 'Processing…' : 'Reprocess'}
+              </button>
               <button className="filter-btn" onClick={() => api().post(`/api/applications/${selectedApp.id}/schedule`, {}).then(() => setSelectedApp(null))}>
                 Schedule
               </button>
@@ -932,23 +1163,30 @@ function TrackerApp({ logout, user }) {
 
 const NAME_TO_CATEGORY = {
   'Applied': 'ALL',
-  'Interviews': 'INTERVIEW_REQUEST',
-  'Screening': 'SCREENING_REQUEST',
+  'Interviews': 'INTERVIEW_OR_SCREENING',
+  'Screening': 'SCREENING',
   'Assessments': 'ASSESSMENT',
-  'Rejections': 'REJECTION',
+  'Rejections': 'REJECTED',
   'Offers': 'OFFER',
 }
 
 function categoryLabel(cat) {
   if (!cat) return 'Other'
   const labels = {
-    INTERVIEW_REQUEST: 'Interview',
-    SCREENING_REQUEST: 'Screening',
-    ASSESSMENT: 'Assessment',
-    REJECTION: 'Rejection',
-    OFFER: 'Offer',
-    APPLICATION_RECEIVED: 'Application received',
-    RECRUITER_OUTREACH: 'Recruiter outreach',
+    job_application_confirmation: 'Application confirmation',
+    job_rejection: 'Rejection',
+    interview_assessment: 'Interview / assessment',
+    application_followup: 'Application follow-up',
+    recruiter_outreach: 'Recruiter outreach',
+    talent_community: 'Talent community',
+    linkedin_connection_request: 'LinkedIn connection request',
+    linkedin_message: 'LinkedIn message',
+    linkedin_job_recommendations: 'LinkedIn job recommendations',
+    linkedin_profile_activity: 'LinkedIn profile activity',
+    job_alerts: 'Job alerts',
+    verification_security: 'Verification / security',
+    promotional_marketing: 'Promotional / marketing',
+    receipts_invoices: 'Receipts / invoices',
   }
   return labels[cat] || cat.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
 }

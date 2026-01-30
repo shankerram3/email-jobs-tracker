@@ -1,4 +1,5 @@
-"""Background email sync: history-based incremental, classification cache, duplicate detection."""
+"""Background email sync: history-based incremental, LangGraph classification, caching, duplicate detection."""
+import json
 import re
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,7 +18,7 @@ from ..gmail_service import (
     email_to_parts,
 )
 from ..config import settings
-from ..models import Application, EmailLog, SyncMetadata, SyncState
+from ..models import Application, EmailLog, SyncMetadata, SyncState, ClassificationCache
 from ..sync_state_db import (
     get_sync_state,
     get_last_history_id,
@@ -25,16 +26,19 @@ from ..sync_state_db import (
     set_last_full_sync_at,
     set_memory_progress,
 )
-from .classification_service import (
-    classify_and_cache,
-    get_cached_classification,
-    persist_llm_result_to_cache,
-    normalize_company_with_db,
-)
-from ..email_classifier import classify_email_llm_only, structured_classify_emails_batch, apply_category_overrides
+from .classification_service import normalize_company_with_db
+from ..email_classifier import content_hash
+from ..langgraph_pipeline import process_email as langgraph_process_email, EMAIL_CATEGORIES
 
 LAST_SYNCED_AT_KEY = "last_synced_at"
 DUPLICATE_DAYS_WINDOW = 14
+
+APPLICATION_LIKE_CLASSES = {
+    "job_application_confirmation",
+    "job_rejection",
+    "interview_assessment",
+    "application_followup",
+}
 
 
 def _extract_linkedin_url(text: str) -> Optional[str]:
@@ -76,13 +80,20 @@ def _is_duplicate_application(
 def _set_transition_timestamps(app: Application, received: Optional[datetime], category: str):
     if not received:
         return
+    stage = (app.application_stage or "").strip()
+    if stage:
+        if stage in ("Applied", "Screening", "Interview", "Offer", "Rejected"):
+            app.applied_at = app.applied_at or received
+        if stage == "Rejected":
+            app.rejected_at = app.rejected_at or received
+        elif stage in ("Interview", "Screening"):
+            app.interview_at = app.interview_at or received
+        elif stage == "Offer":
+            app.offer_at = app.offer_at or received
+        return
+
+    # Fallback: if stage wasn't set yet, mark applied timestamp.
     app.applied_at = app.applied_at or received
-    if category == "REJECTION":
-        app.rejected_at = app.rejected_at or received
-    elif category in ("INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT"):
-        app.interview_at = app.interview_at or received
-    elif category == "OFFER":
-        app.offer_at = app.offer_at or received
 
 
 def _parse_received(received_iso: Optional[str]) -> Optional[datetime]:
@@ -100,6 +111,59 @@ def _parse_received(received_iso: Optional[str]) -> Optional[datetime]:
 BATCH_COMMIT_SIZE = 50
 
 
+def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: str) -> Optional[dict]:
+    """Return cached LangGraph state if present and valid; otherwise None."""
+    h = content_hash(subject, sender, body)
+    row = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    if not row or not row.raw_json:
+        return None
+    try:
+        data = json.loads(row.raw_json)
+    except Exception:
+        return None
+    email_class = (data.get("email_class") or "").strip()
+    if email_class not in EMAIL_CATEGORIES:
+        return None
+    return data
+
+
+def _persist_langgraph_state_to_cache(
+    db: Session, subject: str, sender: str, body: str, state: dict, commit: bool = False
+) -> None:
+    """Upsert LangGraph state into `classification_cache` by content_hash."""
+    h = content_hash(subject, sender, body)
+    email_class = (state.get("email_class") or "").strip()
+    if email_class not in EMAIL_CATEGORIES:
+        email_class = "promotional_marketing"
+
+    raw_json = json.dumps(state)
+    existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    if existing:
+        existing.category = email_class
+        existing.company_name = state.get("company_name")
+        existing.job_title = state.get("job_title")
+        existing.confidence = state.get("confidence")
+        existing.raw_json = raw_json
+    else:
+        db.add(
+            ClassificationCache(
+                content_hash=h,
+                category=email_class,
+                subcategory=None,
+                company_name=state.get("company_name"),
+                job_title=state.get("job_title"),
+                salary_min=None,
+                salary_max=None,
+                location=None,
+                confidence=state.get("confidence"),
+                raw_json=raw_json,
+            )
+        )
+    db.flush()
+    if commit:
+        db.commit()
+
+
 def _create_application_and_log(
     db: Session,
     mid: str,
@@ -111,31 +175,68 @@ def _create_application_and_log(
     received: Optional[datetime],
     commit: bool = True,
 ) -> None:
-    category = structured.get("category") or "OTHER"
+    email_class = (structured.get("email_class") or "").strip()
+    if email_class not in EMAIL_CATEGORIES:
+        email_class = "promotional_marketing"
+
+    company_name = (structured.get("company_name") or "Unknown")
+    company_name = normalize_company_with_db(db, company_name)[:255]
+
     job_title = structured.get("job_title")
-    company_name = (structured.get("company_name") or "Unknown")[:255]
+    if job_title:
+        job_title = job_title[:255]
+
+    application_stage = (structured.get("application_stage") or "Other")
+    requires_action = bool(structured.get("requires_action") or False)
+    action_items = structured.get("action_items") or []
+    if not isinstance(action_items, list):
+        action_items = []
+
+    status = "APPLIED"
+    if application_stage == "Rejected":
+        status = "REJECTED"
+    elif application_stage in ("Interview", "Screening"):
+        status = "INTERVIEWING"
+    elif application_stage == "Offer":
+        status = "OFFER"
+
+    processed_by = structured.get("processed_by")
+    if not processed_by:
+        model_name = getattr(settings, "openai_model", None) or "gpt-4o-mini"
+        processed_by = f"langgraph-openai:{model_name}"
+
     app = Application(
         gmail_message_id=mid,
         user_id=user_id,
         company_name=company_name,
-        position=job_title[:255] if job_title else None,
-        job_title=job_title[:255] if job_title else None,
-        status="APPLIED",
-        category=category,
-        subcategory=structured.get("subcategory"),
-        salary_min=structured.get("salary_min"),
-        salary_max=structured.get("salary_max"),
-        location=structured.get("location"),
+        position=job_title,
+        job_title=job_title,
+        status=status,
+        category=email_class,
+        subcategory=None,
+        salary_min=None,
+        salary_max=None,
+        location=None,
         confidence=structured.get("confidence"),
         email_subject=(subject or "")[:500],
         email_from=(sender or "")[:255],
         email_body=(body or "")[:10000] if body else None,
         received_date=received,
         linkedin_url=_extract_linkedin_url(body or ""),
+        classification_reasoning=structured.get("classification_reasoning"),
+        position_level=structured.get("position_level"),
+        application_stage=application_stage,
+        requires_action=requires_action,
+        action_items=action_items,
+        resume_matched=structured.get("resume_matched"),
+        resume_file_id=structured.get("resume_file_id"),
+        resume_version=structured.get("resume_version"),
+        processing_status=structured.get("processing_status") or "completed",
+        processed_by=processed_by,
     )
-    _set_transition_timestamps(app, received, category)
+    _set_transition_timestamps(app, received, email_class)
     db.add(app)
-    db.add(EmailLog(gmail_message_id=mid, user_id=user_id, classification=category))
+    db.add(EmailLog(gmail_message_id=mid, user_id=user_id, classification=email_class))
     if commit:
         db.commit()
 
@@ -304,7 +405,7 @@ def run_sync_with_options(
     skipped_duplicate = 0
     pending_commits = 0
 
-    # Phase 1: parse, check existing, check cache; collect pending (cache misses) for LLM
+    # Phase 1: parse, check existing, check cache; collect pending (cache misses) for LangGraph
     PendingItem = Tuple[int, str, str, str, str, str]  # (idx, mid, subject, sender, body, received_iso)
     pending: List[PendingItem] = []
     processed_after_phase1 = 0
@@ -330,15 +431,13 @@ def run_sync_with_options(
             progress(i + 1, total, "Classifying…")
             continue
 
-        cached = get_cached_classification(db, subject, sender, body)
+        cached = _get_cached_langgraph_state(db, subject, sender, body)
         if cached is not None:
-            cached = apply_category_overrides(cached, subject, body, sender)
-            company = normalize_company_with_db(db, cached["company_name"])
-            cached = {**cached, "company_name": company}
             received = _parse_received(received_iso)
+            email_class = cached.get("email_class")
             company_name = cached.get("company_name") or "Unknown"
             job_title = cached.get("job_title")
-            if _is_duplicate_application(db, company_name, job_title, received, user_id):
+            if email_class in APPLICATION_LIKE_CLASSES and _is_duplicate_application(db, company_name, job_title, received, user_id):
                 logger.info(f"Email {i+1}/{total}: DUPLICATE (msg_id={mid})")
                 skipped += 1
                 skipped_duplicate += 1
@@ -356,41 +455,31 @@ def run_sync_with_options(
 
         pending.append((i, mid, subject, sender, body, received_iso))
 
-    # Phase 2: parallel LLM for pending (batch or per-email)
+    # Phase 2: parallel LangGraph for pending (per-email)
     llm_results: dict[int, Tuple[Optional[dict], Optional[Exception]]] = {}
     max_concurrency = max(1, getattr(settings, "classification_max_concurrency", 5))
-    use_batch = getattr(settings, "classification_use_batch_prompt", False) and getattr(settings, "classification_batch_size", 0) > 0
-    batch_size = getattr(settings, "classification_batch_size", 0) if use_batch else 0
 
-    def _run_llm(item: PendingItem) -> Tuple[int, Optional[dict], Optional[Exception]]:
-        idx, mid, subject, sender, body, _ = item
+    def _run_langgraph(item: PendingItem) -> Tuple[int, Optional[dict], Optional[Exception]]:
+        idx, mid, subject, sender, body, received_iso = item
         try:
-            result = classify_email_llm_only(subject, body, sender)
+            result = langgraph_process_email(
+                email_id=mid,
+                subject=subject,
+                body=body,
+                sender=sender,
+                received_date=received_iso or "",
+            )
             return (idx, result, None)
         except Exception as e:
             return (idx, None, e)
 
-    def _run_batch(chunk: List[PendingItem]) -> List[Tuple[int, Optional[dict], Optional[Exception]]]:
-        emails = [(item[2], item[4], item[3]) for item in chunk]  # subject, body, sender
-        batch_results = structured_classify_emails_batch(emails)
-        if not batch_results or len(batch_results) != len(chunk):
-            return [_run_llm(item) for item in chunk]
-        return [(chunk[i][0], batch_results[i], None) for i in range(len(chunk))]
-
     if pending:
         progress(total - len(pending), total, "Classifying…")
         with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-            if use_batch and batch_size > 0:
-                chunks = [pending[i : i + batch_size] for i in range(0, len(pending), batch_size)]
-                futures = [executor.submit(_run_batch, c) for c in chunks]
-                for fut in as_completed(futures):
-                    for idx, result, err in fut.result():
-                        llm_results[idx] = (result, err)
-            else:
-                futures = {executor.submit(_run_llm, item): item for item in pending}
-                for fut in as_completed(futures):
-                    idx, result, err = fut.result()
-                    llm_results[idx] = (result, err)
+            futures = {executor.submit(_run_langgraph, item): item for item in pending}
+            for fut in as_completed(futures):
+                idx, result, err = fut.result()
+                llm_results[idx] = (result, err)
 
     # Phase 3: persist cache, duplicate check, create applications (main thread, same DB session)
     processed_so_far = total - len(pending)
@@ -408,7 +497,8 @@ def run_sync_with_options(
             continue
 
         try:
-            structured = persist_llm_result_to_cache(db, subject, sender, body, result, commit=False)
+            structured = dict(result or {})
+            _persist_langgraph_state_to_cache(db, subject, sender, body, structured, commit=False)
         except Exception as e:
             logger.error(f"Email {idx+1}/{total}: Cache persist failed - {str(e)[:100]}")
             db.add(EmailLog(gmail_message_id=mid, user_id=user_id, error=str(e), classification=None))
@@ -417,16 +507,16 @@ def run_sync_with_options(
             continue
 
         received = _parse_received(received_iso)
+        email_class = structured.get("email_class")
         company_name = structured.get("company_name") or "Unknown"
         job_title = structured.get("job_title")
-        if _is_duplicate_application(db, company_name, job_title, received, user_id):
+        if email_class in APPLICATION_LIKE_CLASSES and _is_duplicate_application(db, company_name, job_title, received, user_id):
             logger.info(f"Email {idx+1}/{total}: DUPLICATE (msg_id={mid})")
             skipped += 1
             skipped_duplicate += 1
             continue
 
-        category = structured.get("category") or "OTHER"
-        logger.info(f"Email {idx+1}/{total}: CREATING (msg_id={mid}, category={category})")
+        logger.info(f"Email {idx+1}/{total}: CREATING (msg_id={mid}, class={email_class})")
         _create_application_and_log(db, mid, user_id, structured, subject, sender, body, received, commit=False)
         created += 1
         pending_commits += 1

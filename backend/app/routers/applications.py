@@ -2,9 +2,11 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy import or_
 
 from ..database import get_db
 from ..models import Application
+from ..langgraph_pipeline import EMAIL_CATEGORIES
 from ..schemas import (
     ApplicationStats,
     ApplicationResponse,
@@ -29,11 +31,39 @@ def get_stats(
 ):
     q = _app_query(db, current_user)
     total = q.count()
-    rejections = q.filter(Application.category == "REJECTION").count()
-    interviews = q.filter(Application.category == "INTERVIEW_REQUEST").count()
-    screening_requests = q.filter(Application.category == "SCREENING_REQUEST").count()
-    assessments = q.filter(Application.category == "ASSESSMENT").count()
-    offers = q.filter(Application.category == "OFFER").count()
+
+    # Stage-based stats (category now holds the 14 LangGraph classes).
+    rejections = q.filter(Application.application_stage == "Rejected").count()
+    offers = q.filter(Application.application_stage == "Offer").count()
+    screening_requests = q.filter(Application.application_stage == "Screening").count()
+
+    # Split interview vs assessment heuristically within interview_assessment.
+    assessment_terms = [
+        "%assessment%",
+        "%codesignal%",
+        "%hackerrank%",
+        "%codility%",
+        "%take-home%",
+        "%take home%",
+        "%technical test%",
+        "%coding challenge%",
+    ]
+    assessment_like = or_(
+        *[
+            or_(
+                Application.email_subject.ilike(t),
+                Application.email_body.ilike(t),
+            )
+            for t in assessment_terms
+        ]
+    )
+    assessments = q.filter(Application.category == "interview_assessment").filter(assessment_like).count()
+    interviews = (
+        q.filter(Application.application_stage == "Interview")
+        .filter(~assessment_like)
+        .count()
+    )
+
     pending = total - (rejections + interviews + screening_requests + assessments + offers)
     return ApplicationStats(
         total_applications=total,
@@ -56,10 +86,52 @@ def get_applications(
 ):
     query = _app_query(db, current_user)
     if status and status != "ALL":
+        # Backward compatible filters for the old UI + new stage/category filters.
+        assessment_terms = [
+            "%assessment%",
+            "%codesignal%",
+            "%hackerrank%",
+            "%codility%",
+            "%take-home%",
+            "%take home%",
+            "%technical test%",
+            "%coding challenge%",
+        ]
+        assessment_like = or_(
+            *[
+                or_(
+                    Application.email_subject.ilike(t),
+                    Application.email_body.ilike(t),
+                )
+                for t in assessment_terms
+            ]
+        )
+
         if status == "INTERVIEW_OR_SCREENING":
-            query = query.filter(Application.category.in_(["INTERVIEW_REQUEST", "SCREENING_REQUEST"]))
-        else:
+            query = query.filter(Application.application_stage.in_(["Interview", "Screening"]))
+        elif status == "ASSESSMENT":
+            query = (
+                query.filter(Application.category == "interview_assessment")
+                .filter(assessment_like)
+            )
+        elif status in ("REJECTION", "REJECTED"):
+            query = query.filter(Application.application_stage == "Rejected")
+        elif status == "OFFER":
+            query = query.filter(Application.application_stage == "Offer")
+        elif status == "APPLIED":
+            query = query.filter(Application.application_stage == "Applied")
+        elif status == "SCREENING":
+            query = query.filter(Application.application_stage == "Screening")
+        elif status == "INTERVIEW":
+            query = query.filter(Application.application_stage == "Interview")
+        elif status in ("CONTACTED", "PIPELINE", "OTHER"):
+            query = query.filter(Application.application_stage == status.title())
+        elif status in EMAIL_CATEGORIES:
+            # Category filter for 14 classes.
             query = query.filter(Application.category == status)
+        else:
+            # Fall back to treating it as stage name if it matches.
+            query = query.filter(Application.application_stage == status)
     total = query.count()
     applications = (
         query.order_by(Application.received_date.desc().nulls_last())

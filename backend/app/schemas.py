@@ -26,6 +26,14 @@ class ApplicationResponse(BaseModel):
     salary_max: Optional[float] = None
     location: Optional[str] = None
     confidence: Optional[float] = None
+    # LangGraph fields (now used by the React UI)
+    classification_reasoning: Optional[str] = None
+    position_level: Optional[str] = None
+    application_stage: Optional[str] = None
+    requires_action: bool = False
+    action_items: Optional[List[str]] = None
+    resume_matched: Optional[str] = None
+    processing_status: Optional[str] = None
     received_date: Optional[datetime] = None
     email_subject: str
     email_from: Optional[str] = None
@@ -99,3 +107,77 @@ class ScheduleRequest(BaseModel):
 class RespondRequest(BaseModel):
     message: Optional[str] = None
     template: Optional[str] = None
+
+
+# =============================================================================
+# LangGraph Classification Schemas
+# =============================================================================
+
+class EmailInput(BaseModel):
+    """Input for processing a single email."""
+    email_id: str
+    subject: str
+    body: str
+    sender: str
+    received_date: Optional[str] = None
+
+
+class ClassificationResult(BaseModel):
+    """Result from LangGraph classification pipeline."""
+    email_id: str
+    email_class: str
+    confidence: float
+    classification_reasoning: Optional[str] = None
+    company_name: Optional[str] = None
+    job_title: Optional[str] = None
+    position_level: Optional[str] = None
+    application_stage: str
+    requires_action: bool
+    action_items: List[str] = []
+    resume_matched: Optional[str] = None
+    processing_status: str
+    errors: List[str] = []
+
+
+class ApplicationDetailResponse(BaseModel):
+    """Extended application response with LangGraph fields."""
+    id: int
+    gmail_message_id: str
+    company_name: str
+    position: Optional[str] = None
+    status: str
+    category: str
+    email_subject: str
+    email_from: Optional[str] = None
+    received_date: Optional[datetime] = None
+    created_at: datetime
+
+    # LangGraph classification fields
+    confidence: Optional[float] = None
+    classification_reasoning: Optional[str] = None
+    position_level: Optional[str] = None
+    application_stage: Optional[str] = None
+    requires_action: bool = False
+    action_items: Optional[List[str]] = None
+    resume_matched: Optional[str] = None
+    processing_status: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CategoryStats(BaseModel):
+    """Statistics for a single category."""
+    category: str
+    count: int
+    avg_confidence: Optional[float] = None
+    requires_action_count: int = 0
+
+
+class ClassificationAnalytics(BaseModel):
+    """Overall classification analytics."""
+    total_processed: int
+    by_category: List[CategoryStats]
+    by_stage: dict
+    action_required_count: int
+    avg_confidence: Optional[float] = None

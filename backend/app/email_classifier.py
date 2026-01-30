@@ -5,6 +5,7 @@ import re
 from typing import Optional, List, Tuple, Iterable
 
 from .config import settings
+from .job_title_extraction import get_job_title_candidates, pick_best_job_title
 
 CATEGORIES = {
     "REJECTION",
@@ -212,8 +213,14 @@ def apply_category_overrides(result: dict, subject: str, body: str, sender: str)
 
 def _regex_job_title(subject: str, body: str) -> Optional[str]:
     """Extract job title from subject/body with regex."""
+    # Prefer shared deterministic extractor to keep behavior consistent with LangGraph.
+    body_sample = (body or "")[:2000]
+    cands = get_job_title_candidates(subject=subject or "", body=body_sample)
+    if cands:
+        return cands[0].value[:200]
+
+    # Last-resort: keep legacy regex behavior as a safety net.
     text = f"{subject or ''} {body or ''}"[:1500]
-    # "Software Engineer", "Senior Developer", "Product Manager"
     m = re.search(
         r"(?:position|role|title|hiring)\s*[:\-]?\s*([A-Z][a-zA-Z\s&]{3,50})(?:\s+at|\s*\.|\s*$|\n)",
         text,
@@ -221,11 +228,10 @@ def _regex_job_title(subject: str, body: str) -> Optional[str]:
     )
     if m:
         return m.group(1).strip()[:200]
-    # Fallback: first "X at Company" or "X - Company"
     m = re.search(r"^([A-Za-z\s&]+)\s+(?:at|-)\s+", subject or "")
     if m:
         return m.group(1).strip()[:200]
-    return None
+    return pick_best_job_title(subject=subject or "", body=body_sample, llm_suggested=None)
 
 
 def structured_classify_email(subject: str, body: str, sender: str) -> dict:

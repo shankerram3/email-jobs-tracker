@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Text,
     Float,
+    Boolean,
     ForeignKey,
     Index,
 )
@@ -56,6 +57,24 @@ class Application(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     linkedin_url = Column(String, nullable=True)
+
+    # LangGraph classification fields
+    classification_reasoning = Column(Text, nullable=True)  # Why this category
+    position_level = Column(String, nullable=True)  # Junior/Mid/Senior/Staff/Principal
+
+    # Application stage tracking
+    application_stage = Column(String, default="Other")  # Applied, Screening, Interview, Offer, Rejected
+    requires_action = Column(Boolean, default=False)
+    action_items = Column(JSON, nullable=True)  # List of action strings
+
+    # Resume matching (placeholder for future Google Drive integration)
+    resume_matched = Column(String, nullable=True)
+    resume_file_id = Column(String, nullable=True)
+    resume_version = Column(String, nullable=True)
+
+    # Processing metadata
+    processing_status = Column(String, default="pending")  # pending, completed, failed
+    processed_by = Column(String, nullable=True)  # Model version that processed this
 
 
 class EmailLog(Base):
@@ -135,6 +154,20 @@ class ClassificationCache(Base):
     location = Column(String, nullable=True)
     confidence = Column(Float, nullable=True)
     raw_json = Column(Text, nullable=True)  # full structured payload as JSON string
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Resume(Base):
+    """Resume metadata for matching applications to resume versions."""
+    __tablename__ = "resumes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String, nullable=False)
+    drive_file_id = Column(String, nullable=True, index=True)
+    version = Column(String, nullable=True, index=True)
+    company = Column(String, nullable=True, index=True)
+    job_title = Column(String, nullable=True, index=True)
+    specialization = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

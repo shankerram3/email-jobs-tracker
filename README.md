@@ -1,6 +1,6 @@
 # Job Application Tracker (Email Jobs Tracker)
 
-Track job applications by syncing Gmail (history-based incremental sync), classifying emails with AI (structured extraction + cache), and viewing analytics. Real-time sync progress via SSE; optional JWT or API key auth.
+Track job applications by syncing Gmail (history-based incremental sync), classifying emails with AI (LangGraph pipeline + cache), and viewing analytics. Real-time sync progress via SSE; optional JWT or API key auth.
 
 ---
 
@@ -37,8 +37,9 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 |-----------|------|
 | **FastAPI backend** | REST API, Gmail OAuth redirect, sync orchestration, SSE stream |
 | **Gmail service** | History API for incremental sync; search + pagination for full sync; rate limit/backoff |
-| **Email processor** | Fetches messages, dedupes, runs classification (cache + LLM + regex fallback), writes to DB |
-| **Classification service** | Content hash → cache lookup; on miss: structured LLM extraction; company normalization |
+| **Email processor** | Fetches messages, dedupes, runs classification (cache + LangGraph), writes to DB |
+| **LangGraph pipeline** | Multi-node flow that produces `email_class` + entities + stage + action items |
+| **Job title extraction helper** | Deterministic title candidate extraction + cleaning + fallback when the model returns `null` |
 | **Sync state** | In-memory progress (processed/total/message) for `/sync-status` and SSE; DB state (historyId, last_synced_at) for incremental |
 | **Celery (optional)** | Async sync task; requires Redis as broker (if not used, sync runs in-process via BackgroundTasks) |
 | **Frontend** | React + Vite; lists applications, triggers sync, shows SSE progress; analytics dashboard |
@@ -57,9 +58,49 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 
 ---
 
+### System diagrams
+
+#### Sync + classification flow (high-level)
+
+```mermaid
+flowchart TD
+  User[User] --> Frontend[Frontend_React]
+  Frontend -->|"POST_/api/sync-emails"| Backend[Backend_FastAPI]
+  Backend --> Gmail[Gmail_API]
+  Gmail --> Backend
+  Backend -->|"cache_lookup(content_hash)"| Cache[(classification_cache)]
+  Cache --> Backend
+  Backend -->|"cache_miss"| LangGraph[LangGraph_Pipeline]
+  LangGraph --> Backend
+  Backend --> DB[(DB_SQLite_or_Postgres)]
+  Backend -->|"SSE_/api/sync-events"| Frontend
+  Frontend --> User
+```
+
+#### LangGraph pipeline (conceptual)
+
+```mermaid
+flowchart TD
+  StartNode[START] --> ClassifyNode[classify_email_node]
+  ClassifyNode --> ExtractNode[extract_entities_node]
+  ExtractNode --> StageNode[assign_stage_node]
+  StageNode --> ActionNode[detect_action_items_node]
+  ActionNode --> ResumeNode[match_resume_node]
+  ResumeNode --> EndNode[END]
+```
+
+### Job title extraction (why titles stopped being `null`)
+
+When the model returns a missing/`null` job title, the backend now attempts a safe fallback:
+
+- **Candidate mining**: extract plausible titles from subject/body using common patterns (applied-flow and recruiter outreach).
+- **Cleaning**: strip wrappers like `Role:` / `Position:` and suffixes like `at <Company>`, and remove requisition tokens (e.g. `Req #A-123`).
+- **Plausibility checks**: reject URLs/sentences/boilerplate.
+- **Selection**: prefer the model’s output if plausible; otherwise use the top-ranked candidate.
+
 ## Tech stack
 
-- **Backend:** FastAPI (Python), Gmail API (history + search), OpenAI (structured classification), SQLAlchemy (SQLite/PostgreSQL), Alembic (migrations), Celery + Redis (optional async jobs), SSE (sync progress)
+- **Backend:** FastAPI (Python), Gmail API (history + search), OpenAI (LangGraph + structured JSON), SQLAlchemy (SQLite/PostgreSQL), Alembic (migrations), Celery + Redis (optional async jobs), SSE (sync progress)
 - **Frontend:** React, Vite, Recharts, Axios
 - **Auth:** JWT (HS256) or static API key in header. Protected endpoints (applications, sync, analytics) require authentication; if neither `SECRET_KEY` nor `API_KEY` is set, those routes return 401. Set at least one for normal use (e.g. `SECRET_KEY` and use `POST /api/login`, or `API_KEY` in header).
 
@@ -77,7 +118,9 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 │   │   ├── schemas.py           # Pydantic request/response models
 │   │   ├── auth.py              # JWT + API key, get_current_user
 │   │   ├── gmail_service.py     # Gmail API, history, pagination, rate limit
-│   │   ├── email_classifier.py  # Structured LLM + cache hash + regex fallback
+│   │   ├── langgraph_pipeline.py # LangGraph pipeline: class → entities → stage → actions
+│   │   ├── job_title_extraction.py # Deterministic job title candidates + cleaning
+│   │   ├── email_classifier.py  # Legacy structured LLM (kept for compatibility; shares title extractor)
 │   │   ├── sync_state.py        # In-memory sync progress
 │   │   ├── sync_state_db.py    # DB sync state (historyId, etc.)
 │   │   ├── celery_app.py       # Celery app (broker = Redis)
@@ -86,6 +129,7 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 │   │   │   ├── applications.py  # /stats, /applications, /applications/{id}, schedule, respond
 │   │   │   ├── sync.py          # /gmail/auth, /sync-emails, /sync-status, /sync-events
 │   │   │   ├── analytics.py     # /funnel, /response-rate, /time-to-event, /prediction
+│   │   │   ├── langgraph.py     # /api/langgraph/* (debug/reprocess endpoints)
 │   │   │   └── auth_router.py  # /login
 │   │   └── services/
 │   │       ├── email_processor.py    # run_sync_with_options, fetch + classify + persist
@@ -111,12 +155,13 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 
 | Table | Purpose |
 |-------|---------|
-| **applications** | One row per classified job email: company_name, position, status, category, subcategory, job_title, salary_min/max, location, confidence, email_* fields, received_date, applied_at/rejected_at/interview_at/offer_at, linkedin_url, created_at, updated_at. `gmail_message_id` unique. |
+| **applications** | One row per classified job email: company_name, status, category, job_title, confidence, email_* fields, received_date, transition timestamps; plus LangGraph fields like `classification_reasoning`, `position_level`, `application_stage`, `requires_action`, `action_items`, and processing metadata like `processed_by`. `gmail_message_id` is unique per user. |
 | **email_logs** | Processed Gmail message IDs, processed_at, classification, error (for idempotency/debug). |
 | **sync_metadata** | Key-value (e.g. last_synced_at) for backward compatibility. |
 | **sync_state** | last_history_id, last_synced_at, last_full_sync_at, status (idle/syncing/error), error, updated_at. |
 | **companies** | canonical_name, aliases (JSON), industry. |
-| **classification_cache** | content_hash (unique), category, subcategory, company_name, job_title, salary_min/max, location, confidence, raw_json, created_at. |
+| **classification_cache** | content_hash (unique) → cached classification state (`raw_json`) plus selected fields for quick lookup. Used to avoid re-running the model on the same email content. |
+| **resumes** | Resume metadata for future matching to applications (Drive file id/version/etc.). |
 
 ### Indexes (applications)
 
@@ -249,6 +294,14 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 | POST | `/api/sync-emails` | Query: `mode=auto\|incremental\|full` | Start sync in background; returns immediately. |
 | GET | `/api/sync-status` | — | Current sync progress for this user: status, message, processed, total, created, skipped, errors, error. |
 | GET | `/api/sync-events` | Optional: `token` (for SSE without custom headers) | SSE stream of sync progress for this user until status is idle or error. |
+
+### LangGraph (debug / reprocess)
+
+| Method | Path | Query / Body | Description |
+|--------|------|--------------|-------------|
+| POST | `/api/langgraph/process` | Body: `EmailInput`, Query: `persist=true\|false` | Process a single email through the LangGraph pipeline (optionally persist to DB). |
+| POST | `/api/langgraph/batch_process` | Body: `[EmailInput]`, Query: `persist=true\|false` | Process multiple emails in parallel (optionally persist). |
+| POST | `/api/langgraph/reprocess/{application_id}` | — | Re-run LangGraph on an existing application’s stored email fields and update the row. |
 
 ### Analytics
 

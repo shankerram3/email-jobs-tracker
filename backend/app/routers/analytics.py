@@ -35,9 +35,9 @@ def get_funnel(
     q = _app_query(db, current_user)
     total = q.count()
     applied = total
-    interviews = q.filter(Application.category.in_(["INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT"])).count()
-    offers = q.filter(Application.category == "OFFER").count()
-    rejections = q.filter(Application.category == "REJECTION").count()
+    interviews = q.filter(Application.application_stage.in_(["Interview", "Screening"])).count()
+    offers = q.filter(Application.application_stage == "Offer").count()
+    rejections = q.filter(Application.application_stage == "Rejected").count()
 
     funnel = [
         FunnelStage(stage="Applied", count=applied, pct=100.0 if total else 0),
@@ -56,6 +56,7 @@ def get_response_rate(
 ):
     """Response rate by company or by industry (industry = category for now)."""
     q = _app_query(db, current_user)
+    responded_stage = ["Screening", "Interview", "Offer", "Rejected"]
     if group_by == "industry":
         # Use category as industry proxy
         rows = (
@@ -65,7 +66,7 @@ def get_response_rate(
         )
         applied = {r.category: r.cnt for r in rows}
         responded = (
-            q.filter(Application.category.in_(["REJECTION", "INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT", "OFFER"]))
+            q.filter(Application.application_stage.in_(responded_stage))
             .with_entities(Application.category, func.count(Application.id).label("cnt"))
             .group_by(Application.category)
             .all()
@@ -88,7 +89,7 @@ def get_response_rate(
             .all()
         )
         responded = (
-            q.filter(Application.category.in_(["REJECTION", "INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT", "OFFER"]))
+            q.filter(Application.application_stage.in_(responded_stage))
             .with_entities(Application.company_name, func.count(Application.id).label("cnt"))
             .group_by(Application.company_name)
             .all()
@@ -186,7 +187,14 @@ def _run_prediction_model(db: Session, user_id: int, limit: int) -> List[tuple]:
         cat_enc = le.transform([r.category or "OTHER"])[0]
         X.append([days, cat_enc])
     X = np.array(X)
-    y = np.array([1 if r.category == "OFFER" else (1 if r.category in ("INTERVIEW_REQUEST", "SCREENING_REQUEST", "ASSESSMENT") else 0) for r in rows])
+    y = np.array(
+        [
+            1
+            if (r.application_stage == "Offer")
+            else (1 if (r.application_stage in ("Interview", "Screening")) else 0)
+            for r in rows
+        ]
+    )
     if y.sum() < 2:
         return []
     clf = LogisticRegression(max_iter=500, random_state=42)

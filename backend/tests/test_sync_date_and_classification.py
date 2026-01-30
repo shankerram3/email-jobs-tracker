@@ -87,7 +87,7 @@ def test_full_sync_uses_before_date_in_queries(db):
 
 
 def test_classification_creates_application_on_cache_miss(db):
-    """With one email from Gmail and cache miss, LLM result is persisted and Application created."""
+    """With one email from Gmail and cache miss, LangGraph result is persisted and Application created."""
     one_email = {
         "id": "msg-sync-test-1",
         "payload": {
@@ -104,15 +104,18 @@ def test_classification_creates_application_on_cache_miss(db):
     def return_one_email(service, query, max_results=100):
         return [one_email]
 
-    llm_result = {
-        "category": "INTERVIEW_REQUEST",
-        "subcategory": "phone_screen",
+    langgraph_result = {
+        "email_class": "interview_assessment",
         "company_name": "Acme",
         "job_title": "Software Engineer",
-        "salary_min": None,
-        "salary_max": None,
-        "location": None,
+        "position_level": "Mid",
         "confidence": 0.9,
+        "classification_reasoning": "Scheduling / assessment email.",
+        "application_stage": "Screening",
+        "requires_action": True,
+        "action_items": ["Complete assessment or schedule interview"],
+        "processing_status": "completed",
+        "errors": [],
     }
 
     mock_service = MagicMock()
@@ -120,8 +123,8 @@ def test_classification_creates_application_on_cache_miss(db):
         patch("app.services.email_processor.get_gmail_service", return_value=mock_service),
         patch("app.services.email_processor.fetch_emails", side_effect=return_one_email),
         patch("app.services.email_processor.get_profile_history_id", return_value="hist1"),
-        patch("app.services.email_processor.get_cached_classification", return_value=None),
-        patch("app.services.email_processor.classify_email_llm_only", return_value=llm_result),
+        patch("app.services.email_processor._get_cached_langgraph_state", return_value=None),
+        patch("app.services.email_processor.langgraph_process_email", return_value=langgraph_result),
     ):
         result = run_sync_with_options(db, mode="full")
 
@@ -131,4 +134,6 @@ def test_classification_creates_application_on_cache_miss(db):
     assert db.query(EmailLog).count() == 1
     app = db.query(Application).first()
     assert app.company_name == "Acme"
-    assert app.category == "INTERVIEW_REQUEST"
+    assert app.category == "interview_assessment"
+    assert app.application_stage == "Screening"
+    assert app.status == "INTERVIEWING"
