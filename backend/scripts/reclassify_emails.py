@@ -34,7 +34,11 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import Application, ClassificationCache, User
-from app.email_classifier import content_hash, structured_classify_emails_batch
+from app.email_classifier import (
+    content_hash,
+    structured_classify_emails_batch,
+    structured_classify_email,
+)
 from app.services.classification_service import (
     normalize_company_with_db,
     persist_llm_result_to_cache,
@@ -112,25 +116,40 @@ def reclassify(
             )
             for a in batch
         ]
+        # Try batch classification first (cheaper/faster)
+        results: list[dict] = []
         try:
             results = structured_classify_emails_batch(emails)
         except Exception as e:
             print(f"  Batch LLM error: {e}", file=sys.stderr)
-            errors += len(batch)
-            batch.clear()
-            return
+            results = []
 
+        # Fallback: retry per-email if the batch returns empty/mismatched results
         if len(results) != len(batch):
-            print(f"  Batch result length mismatch: got {len(results)}, expected {len(batch)}", file=sys.stderr)
-            errors += len(batch)
-            batch.clear()
-            return
+            if not quiet:
+                print(
+                    f"  Batch result length mismatch: got {len(results)}, expected {len(batch)}; retrying per-email…",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            results = []
+            for (subject, body, sender) in emails:
+                try:
+                    results.append(structured_classify_email(subject, body, sender))
+                except Exception as e:
+                    # Per-email failure: keep placeholder so we can count errors per record
+                    results.append({"category": "OTHER", "company_name": "Unknown", "_error": str(e)})
 
         for app, result in zip(batch, results):
             processed += 1
             subject = app.email_subject or ""
             sender = app.email_from or ""
             body = app.email_body or ""
+            if result.get("_error"):
+                errors += 1
+                if verbose:
+                    print(f"  app {app.id}: ERROR -> OTHER  ({result.get('_error')})", flush=True)
+                continue
             company_normalized = normalize_company_with_db(db, result.get("company_name") or "Unknown")
             result["company_name"] = company_normalized
             new_cat = result.get("category") or "OTHER"
