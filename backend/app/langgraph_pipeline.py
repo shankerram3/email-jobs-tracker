@@ -615,15 +615,29 @@ Return ONLY valid JSON (no markdown):
         result = _parse_json_response(response_text)
 
         email_class = (result.get("email_class") or "").strip()
+        reasoning = result.get("reasoning", "")
         if email_class not in EMAIL_CATEGORIES:
             email_class = "promotional_marketing"
+
+        # Apply rule-based guards to correct common misclassifications.
+        combined_text = f"{subject}\n{body}"
+        if email_class in ("job_application_confirmation", "talent_community"):
+            if _has_rejection_language(combined_text):
+                email_class = "job_rejection"
+                reasoning = f"[Override: rejection language detected] {reasoning}".strip()
+
+        if email_class == "interview_assessment":
+            if _has_conditional_interview_language(combined_text):
+                if not _has_actual_interview_invitation(combined_text):
+                    email_class = "job_application_confirmation"
+                    reasoning = f"[Override: conditional language, no concrete invite] {reasoning}".strip()
 
         # Skip entity processing for non-job categories
         if email_class in SKIP_EXTRACTION_CATEGORIES:
             return {
                 "email_class": email_class,
                 "confidence": float(result.get("confidence", 0.5)),
-                "classification_reasoning": result.get("reasoning", ""),
+                "classification_reasoning": reasoning,
                 "company_name": None,
                 "job_title": None,
                 "position_level": None,
@@ -640,7 +654,7 @@ Return ONLY valid JSON (no markdown):
         return {
             "email_class": email_class,
             "confidence": float(result.get("confidence", 0.5)),
-            "classification_reasoning": result.get("reasoning", ""),
+            "classification_reasoning": reasoning,
             "company_name": result.get("company_name"),
             "job_title": job_title,
             "position_level": result.get("position_level"),
@@ -1059,6 +1073,7 @@ def _process_batch_llm(emails: List[dict]) -> List[dict]:
     categories_text = "\n".join(
         f"- {name}: {desc}" for name, desc in EMAIL_CATEGORIES.items()
     )
+    guidance_text = _build_guidance_text(max_indicators=4, max_neg_indicators=2, max_snippet_len=160)
 
     email_parts = []
     for i, e in enumerate(emails):
@@ -1076,6 +1091,9 @@ def _process_batch_llm(emails: List[dict]) -> List[dict]:
 
 Categories (choose exactly one per email):
 {categories_text}
+
+GUIDANCE (examples and cues):
+{guidance_text}
 
 PRIORITY RULES (when multiple categories could apply):
 - interview_assessment > job_application_confirmation (if mentions next steps/assessment/coding challenge)
@@ -1164,6 +1182,20 @@ def process_emails_batch(
                     email_class = "promotional_marketing"
 
                 confidence = float(llm_result.get("confidence", 0.5))
+                reasoning = llm_result.get("reasoning", "")
+
+                # Apply rule-based guards to correct common misclassifications.
+                combined_text = f"{email_data.get('subject', '')}\n{email_data.get('body', '')}"
+                if email_class in ("job_application_confirmation", "talent_community"):
+                    if _has_rejection_language(combined_text):
+                        email_class = "job_rejection"
+                        reasoning = f"[Override: rejection language detected] {reasoning}".strip()
+
+                if email_class == "interview_assessment":
+                    if _has_conditional_interview_language(combined_text):
+                        if not _has_actual_interview_invitation(combined_text):
+                            email_class = "job_application_confirmation"
+                            reasoning = f"[Override: conditional language, no concrete invite] {reasoning}".strip()
 
                 # Accuracy safeguard: reprocess low-confidence critical emails individually
                 if confidence < confidence_threshold and email_class in CRITICAL_CATEGORIES:
@@ -1180,7 +1212,7 @@ def process_emails_batch(
                     "received_date": email_data.get("received_date", ""),
                     "email_class": email_class,
                     "confidence": confidence,
-                    "classification_reasoning": llm_result.get("reasoning", ""),
+                    "classification_reasoning": reasoning,
                     "company_name": llm_result.get("company_name"),
                     "job_title": llm_result.get("job_title"),
                     "position_level": llm_result.get("position_level"),
