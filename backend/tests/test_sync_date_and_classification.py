@@ -30,14 +30,14 @@ def test_full_sync_uses_after_date_in_queries(db):
     """run_sync_with_options with after_date set uses that date in full-sync Gmail queries."""
     captured_queries = []
 
-    def capture_fetch(service, query, max_results=100):
-        captured_queries.append(query)
+    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+        captured_queries.extend(queries)
         return []
 
     mock_service = MagicMock()
     with (
         patch("app.services.email_processor.get_gmail_service", return_value=mock_service),
-        patch("app.services.email_processor.fetch_emails", side_effect=capture_fetch),
+        patch("app.services.email_processor.fetch_emails_parallel", side_effect=capture_fetch_parallel),
         patch("app.services.email_processor.get_profile_history_id", return_value="hist1"),
     ):
         run_sync_with_options(db, mode="full", after_date="2024-01-15")
@@ -51,14 +51,14 @@ def test_full_sync_uses_after_date_iso_format(db):
     """after_date YYYY-MM-DD is normalized to YYYY/MM/DD in queries."""
     captured_queries = []
 
-    def capture_fetch(service, query, max_results=100):
-        captured_queries.append(query)
+    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+        captured_queries.extend(queries)
         return []
 
     mock_service = MagicMock()
     with (
         patch("app.services.email_processor.get_gmail_service", return_value=mock_service),
-        patch("app.services.email_processor.fetch_emails", side_effect=capture_fetch),
+        patch("app.services.email_processor.fetch_emails_parallel", side_effect=capture_fetch_parallel),
         patch("app.services.email_processor.get_profile_history_id", return_value="hist1"),
     ):
         run_sync_with_options(db, mode="full", after_date="2025-06-01")
@@ -70,14 +70,14 @@ def test_full_sync_uses_before_date_in_queries(db):
     """run_sync_with_options with before_date set includes before: in Gmail queries."""
     captured_queries = []
 
-    def capture_fetch(service, query, max_results=100):
-        captured_queries.append(query)
+    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+        captured_queries.extend(queries)
         return []
 
     mock_service = MagicMock()
     with (
         patch("app.services.email_processor.get_gmail_service", return_value=mock_service),
-        patch("app.services.email_processor.fetch_emails", side_effect=capture_fetch),
+        patch("app.services.email_processor.fetch_emails_parallel", side_effect=capture_fetch_parallel),
         patch("app.services.email_processor.get_profile_history_id", return_value="hist1"),
     ):
         run_sync_with_options(db, mode="full", after_date="2024-01-01", before_date="2024-06-30")
@@ -101,7 +101,7 @@ def test_classification_creates_application_on_cache_miss(db):
         },
     }
 
-    def return_one_email(service, query, max_results=100):
+    def return_one_email_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
         return [one_email]
 
     langgraph_result = {
@@ -121,9 +121,10 @@ def test_classification_creates_application_on_cache_miss(db):
     mock_service = MagicMock()
     with (
         patch("app.services.email_processor.get_gmail_service", return_value=mock_service),
-        patch("app.services.email_processor.fetch_emails", side_effect=return_one_email),
+        patch("app.services.email_processor.fetch_emails_parallel", side_effect=return_one_email_parallel),
         patch("app.services.email_processor.get_profile_history_id", return_value="hist1"),
         patch("app.services.email_processor._get_cached_langgraph_state", return_value=None),
+        patch("app.services.email_processor.langgraph_process_batch", return_value=[langgraph_result]),
         patch("app.services.email_processor.langgraph_process_email", return_value=langgraph_result),
     ):
         result = run_sync_with_options(db, mode="full")

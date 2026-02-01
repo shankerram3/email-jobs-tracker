@@ -251,6 +251,28 @@ def _chunk_list(items: list, chunk_size: int) -> list[list]:
     return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
+_CACHE_SAFE_FIELDS = {
+    "email_class",
+    "confidence",
+    "classification_reasoning",
+    "company_name",
+    "job_title",
+    "position_level",
+    "application_stage",
+    "requires_action",
+    "action_items",
+}
+
+
+def _sanitize_langgraph_cache_state(state: dict) -> dict:
+    """Drop user-specific or volatile fields before caching or returning."""
+    safe: dict = {k: state.get(k) for k in _CACHE_SAFE_FIELDS if k in state}
+    action_items = safe.get("action_items")
+    if action_items is not None and not isinstance(action_items, list):
+        safe["action_items"] = []
+    return safe
+
+
 def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: str) -> Optional[dict]:
     """
     Return cached LangGraph state if present and valid; otherwise None.
@@ -263,7 +285,7 @@ def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: st
     if redis_cached:
         email_class = (redis_cached.get("email_class") or "").strip()
         if email_class in EMAIL_CATEGORIES:
-            return redis_cached
+            return _sanitize_langgraph_cache_state(redis_cached)
 
     # L2: Fall back to database
     row = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
@@ -278,9 +300,10 @@ def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: st
         return None
 
     # Populate Redis cache for next time
-    set_cached_classification_redis(h, data)
+    sanitized = _sanitize_langgraph_cache_state(data)
+    set_cached_classification_redis(h, sanitized)
 
-    return data
+    return sanitized
 
 
 def _persist_langgraph_state_to_cache(
@@ -291,21 +314,22 @@ def _persist_langgraph_state_to_cache(
     Writes to both Redis L1 and database L2 for consistency.
     """
     h = content_hash(subject, sender, body)
-    email_class = (state.get("email_class") or "").strip()
+    sanitized = _sanitize_langgraph_cache_state(state)
+    email_class = (sanitized.get("email_class") or "").strip()
     if email_class not in EMAIL_CATEGORIES:
         email_class = "promotional_marketing"
 
     # Write to Redis L1 cache
-    set_cached_classification_redis(h, state)
+    set_cached_classification_redis(h, sanitized)
 
     # Write to database L2 cache
-    raw_json = json.dumps(state)
+    raw_json = json.dumps(sanitized)
     existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
     if existing:
         existing.category = email_class
-        existing.company_name = state.get("company_name")
-        existing.job_title = state.get("job_title")
-        existing.confidence = state.get("confidence")
+        existing.company_name = sanitized.get("company_name")
+        existing.job_title = sanitized.get("job_title")
+        existing.confidence = sanitized.get("confidence")
         existing.raw_json = raw_json
     else:
         db.add(
@@ -313,12 +337,12 @@ def _persist_langgraph_state_to_cache(
                 content_hash=h,
                 category=email_class,
                 subcategory=None,
-                company_name=state.get("company_name"),
-                job_title=state.get("job_title"),
+                company_name=sanitized.get("company_name"),
+                job_title=sanitized.get("job_title"),
                 salary_min=None,
                 salary_max=None,
                 location=None,
-                confidence=state.get("confidence"),
+                confidence=sanitized.get("confidence"),
                 raw_json=raw_json,
             )
         )
@@ -634,9 +658,37 @@ def run_sync_with_options(
 
     results_q: "queue.Queue[tuple[str, PendingItem, Optional[dict], Optional[str]]]" = queue.Queue()
 
+    use_batch = getattr(settings, "classification_use_batch_prompt", True)
+    confidence_threshold = getattr(settings, "classification_batch_confidence_threshold", 0.6)
+
     def _worker(worker_id: int, batch_indices: list[int], batches: list[list[PendingItem]]) -> None:
         for bidx in batch_indices:
             batch = batches[bidx]
+            if not batch:
+                continue
+            if use_batch:
+                try:
+                    payload = [
+                        {
+                            "email_id": mid,
+                            "subject": subject,
+                            "body": body,
+                            "sender": sender,
+                            "received_date": received_iso or "",
+                        }
+                        for idx, mid, subject, sender, body, received_iso in batch
+                    ]
+                    batch_results = langgraph_process_batch(
+                        payload,
+                        batch_size=ingestion_batch_size,
+                        confidence_threshold=confidence_threshold,
+                    )
+                    if batch_results and len(batch_results) == len(batch):
+                        for item, result in zip(batch, batch_results):
+                            results_q.put(("ok", item, dict(result or {}), None))
+                        continue
+                except Exception:
+                    pass
             for item in batch:
                 idx, mid, subject, sender, body, received_iso = item
                 try:

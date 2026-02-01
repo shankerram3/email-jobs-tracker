@@ -632,12 +632,16 @@ Return ONLY valid JSON (no markdown):
                     email_class = "job_application_confirmation"
                     reasoning = f"[Override: conditional language, no concrete invite] {reasoning}".strip()
 
+        confidence = float(result.get("confidence", 0.5))
+        needs_review = confidence < 0.65
+
         # Skip entity processing for non-job categories
         if email_class in SKIP_EXTRACTION_CATEGORIES:
             return {
                 "email_class": email_class,
-                "confidence": float(result.get("confidence", 0.5)),
+                "confidence": confidence,
                 "classification_reasoning": reasoning,
+                "needs_review": needs_review,
                 "company_name": None,
                 "job_title": None,
                 "position_level": None,
@@ -651,13 +655,38 @@ Return ONLY valid JSON (no markdown):
         if job_title and not is_plausible_job_title(job_title):
             job_title = title_candidates[0].value if title_candidates else None
 
+        company_name = result.get("company_name")
+        position_level = result.get("position_level")
+
+        # If combined response lacks key fields, fall back to extraction node.
+        if not (company_name and position_level and job_title):
+            extracted = extract_entities_node(
+                {
+                    "email_class": email_class,
+                    "subject": subject,
+                    "sender": sender,
+                    "body": body,
+                }
+            )
+            if not company_name:
+                company_name = extracted.get("company_name")
+            if not position_level:
+                position_level = extracted.get("position_level")
+            if not job_title:
+                fallback_job_title = extracted.get("job_title")
+                job_title = pick_best_job_title(subject=subject, body=body_sample, llm_suggested=fallback_job_title)
+                job_title = clean_job_title(job_title)
+                if job_title and not is_plausible_job_title(job_title):
+                    job_title = title_candidates[0].value if title_candidates else None
+
         return {
             "email_class": email_class,
-            "confidence": float(result.get("confidence", 0.5)),
+            "confidence": confidence,
             "classification_reasoning": reasoning,
-            "company_name": result.get("company_name"),
+            "needs_review": needs_review,
+            "company_name": company_name,
             "job_title": job_title,
-            "position_level": result.get("position_level"),
+            "position_level": position_level,
             "errors": state.get("errors", []),
         }
     except Exception as e:
