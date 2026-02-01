@@ -6,7 +6,8 @@ from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from ..database import get_sync_db
-from ..models import Application
+from ..auth import get_current_user_required
+from ..models import Application, User
 from ..langgraph_pipeline import (
     process_email,
     get_all_categories,
@@ -29,6 +30,7 @@ def process_single_email(
     email: EmailInput,
     persist: bool = False,
     db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Process a single email through the LangGraph pipeline.
@@ -48,6 +50,7 @@ def process_single_email(
             app = (
                 db.query(Application)
                 .filter(Application.gmail_message_id == email.email_id)
+                .filter(Application.user_id == current_user.id)
                 .order_by(Application.id.desc())
                 .first()
             )
@@ -77,7 +80,7 @@ def process_single_email(
                 model_name = getattr(settings, "openai_model", None) or "gpt-4o-mini"
                 app = Application(
                     gmail_message_id=email.email_id,
-                    user_id=None,
+                    user_id=current_user.id,
                     company_name=(result.get("company_name") or "Unknown")[:255],
                     position=(result.get("job_title") or None),
                     job_title=(result.get("job_title") or None),
@@ -123,6 +126,7 @@ async def batch_process_emails(
     emails: List[EmailInput],
     persist: bool = False,
     db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Process multiple emails in parallel.
@@ -145,6 +149,7 @@ async def batch_process_emails(
             app = (
                 db.query(Application)
                 .filter(Application.gmail_message_id == e.email_id)
+                .filter(Application.user_id == current_user.id)
                 .order_by(Application.id.desc())
                 .first()
             )
@@ -174,7 +179,7 @@ async def batch_process_emails(
                 db.add(
                     Application(
                         gmail_message_id=e.email_id,
-                        user_id=None,
+                        user_id=current_user.id,
                         company_name=(r.get("company_name") or "Unknown")[:255],
                         position=(r.get("job_title") or None),
                         job_title=(r.get("job_title") or None),
@@ -203,12 +208,18 @@ async def batch_process_emails(
 def reprocess_application_endpoint(
     application_id: int,
     db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Re-run LangGraph classification on an existing application.
     Useful after model updates or for manual review fixes.
     """
-    app = db.query(Application).filter(Application.id == application_id).first()
+    app = (
+        db.query(Application)
+        .filter(Application.id == application_id)
+        .filter(Application.user_id == current_user.id)
+        .first()
+    )
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
 
@@ -263,7 +274,7 @@ def reprocess_application_endpoint(
 
 
 @router.get("/categories")
-def list_categories():
+def list_categories(current_user: User = Depends(get_current_user_required)):
     """
     List all 14 email classification categories with descriptions.
     """
@@ -277,12 +288,15 @@ def list_categories():
 
 
 @router.get("/analytics", response_model=ClassificationAnalytics)
-def get_classification_analytics(db: Session = Depends(get_sync_db)):
+def get_classification_analytics(
+    db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
+):
     """
     Get classification analytics across all processed applications.
     """
     # Total processed
-    total = db.query(Application).count()
+    total = db.query(Application).filter(Application.user_id == current_user.id).count()
 
     # By category
     category_stats = (
@@ -294,6 +308,7 @@ def get_classification_analytics(db: Session = Depends(get_sync_db)):
                 case((Application.requires_action == True, 1), else_=0)
             ).label("action_count"),
         )
+        .filter(Application.user_id == current_user.id)
         .group_by(Application.category)
         .all()
     )
@@ -314,6 +329,7 @@ def get_classification_analytics(db: Session = Depends(get_sync_db)):
             Application.application_stage,
             func.count(Application.id).label("count"),
         )
+        .filter(Application.user_id == current_user.id)
         .group_by(Application.application_stage)
         .all()
     )
@@ -321,11 +337,18 @@ def get_classification_analytics(db: Session = Depends(get_sync_db)):
 
     # Action required count
     action_count = (
-        db.query(Application).filter(Application.requires_action == True).count()
+        db.query(Application)
+        .filter(Application.user_id == current_user.id)
+        .filter(Application.requires_action == True)
+        .count()
     )
 
     # Overall average confidence
-    avg_conf = db.query(func.avg(Application.confidence)).scalar()
+    avg_conf = (
+        db.query(func.avg(Application.confidence))
+        .filter(Application.user_id == current_user.id)
+        .scalar()
+    )
 
     return ClassificationAnalytics(
         total_processed=total,
@@ -340,12 +363,14 @@ def get_classification_analytics(db: Session = Depends(get_sync_db)):
 def get_action_required(
     limit: int = 20,
     db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Get applications that require user action (interviews, follow-ups, etc.)
     """
     apps = (
         db.query(Application)
+        .filter(Application.user_id == current_user.id)
         .filter(Application.requires_action == True)
         .order_by(Application.received_date.desc())
         .limit(limit)
@@ -382,12 +407,14 @@ def get_low_confidence(
     threshold: float = 0.7,
     limit: int = 20,
     db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Get applications with low classification confidence for manual review.
     """
     apps = (
         db.query(Application)
+        .filter(Application.user_id == current_user.id)
         .filter(Application.confidence < threshold)
         .filter(Application.confidence.isnot(None))
         .order_by(Application.confidence.asc())
@@ -425,12 +452,14 @@ def get_by_stage(
     stage: str,
     limit: int = 50,
     db: Session = Depends(get_sync_db),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Get applications by application stage (Applied, Interview, Rejected, etc.)
     """
     apps = (
         db.query(Application)
+        .filter(Application.user_id == current_user.id)
         .filter(Application.application_stage == stage)
         .order_by(Application.received_date.desc())
         .limit(limit)

@@ -72,24 +72,44 @@ async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
     api_key: Optional[str] = Depends(api_key_header),
 ) -> Optional[User]:
-    """Validate JWT or API key. Returns User or None if auth disabled."""
-    # API key: map to configured user or first user (backward compat)
+    """
+    Validate JWT or API key.
+
+    Security note: this app requires explicit authentication configuration.
+    - No anonymous mode
+    - API keys must map to a specific user via API_KEY_USER_ID
+    """
+    if not settings.secret_key and not settings.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Auth not configured. Set SECRET_KEY (JWT) or API_KEY (+ API_KEY_USER_ID).",
+        )
+
+    # API key: map to configured user (no fallback)
     if settings.api_key and api_key and api_key == settings.api_key:
-        if settings.api_key_user_id is not None:
-            user = await get_user_by_id(db, settings.api_key_user_id)
-            if user:
-                return user
+        if settings.api_key_user_id is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="API key user not found",
+                detail="API key is enabled but API_KEY_USER_ID is not set.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        result = await db.execute(select(User).order_by(User.id).limit(1))
-        user = result.scalars().first()
+        user = await get_user_by_id(db, settings.api_key_user_id)
         if user:
             return user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key user not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # JWT
     if credentials and credentials.credentials:
+        if not settings.secret_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="JWT auth is not enabled (SECRET_KEY not set).",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         data = verify_token(credentials.credentials)
         if data and data.sub:
             try:
@@ -99,9 +119,7 @@ async def get_current_user(
                     return user
             except ValueError:
                 pass
-    # No auth configured: allow anonymous (backward compatible)
-    if not settings.secret_key and not settings.api_key:
-        return None
+
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or missing credentials",

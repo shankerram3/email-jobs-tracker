@@ -2,6 +2,7 @@
 import os
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
+os.environ.setdefault("SECRET_KEY", "test-secret")
 
 import pytest
 from fastapi.testclient import TestClient
