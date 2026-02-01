@@ -35,8 +35,6 @@ RUN mkdir -p /data \
   && chmod +x /app/backend/docker-entrypoint.sh \
   && chown -R appuser:appuser /app /data
 
-USER appuser
-
 ENV TOKEN_PATH=/data/token.pickle
 
 EXPOSE 8000

@@ -29,5 +29,3 @@ RUN mkdir -p /data \
   && chown -R appuser:appuser /app /data
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-
-USER appuser

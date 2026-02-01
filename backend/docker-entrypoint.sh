@@ -5,6 +5,25 @@ set -eu
 : "${RUN_MIGRATIONS:=1}"
 : "${PORT:=8000}"
 
+# Ensure /data exists and is writable (Railway volumes may mount root-owned).
+# If this fails, we will fall back to /tmp (non-persistent).
+mkdir -p /data 2>/dev/null || true
+if [ -w /data ]; then
+  :
+else
+  # Try to make it writable if we are running as root.
+  if [ "$(id -u)" = "0" ]; then
+    chmod 777 /data 2>/dev/null || true
+  fi
+fi
+
+# If still not writable, fall back to /tmp paths so the app can start.
+if [ ! -w /data ]; then
+  echo "[entrypoint] WARNING: /data is not writable; falling back to /tmp (OAuth token will not persist across restarts)."
+  : "${CREDENTIALS_PATH:=/tmp/credentials.json}"
+  : "${TOKEN_PATH:=/tmp/token.pickle}"
+fi
+
 # Optional: allow providing Gmail OAuth client JSON via env var (useful on PaaS).
 # If set, we write it to CREDENTIALS_PATH (or /data/credentials.json by default).
 if [ "${GMAIL_CREDENTIALS_JSON:-}" != "" ]; then
