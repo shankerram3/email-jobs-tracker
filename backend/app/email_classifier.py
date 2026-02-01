@@ -6,6 +6,8 @@ from typing import Optional, List, Tuple, Iterable
 
 from .config import settings
 from .job_title_extraction import get_job_title_candidates, pick_best_job_title
+from .email_relevance_filter import is_job_related_email, rule_based_relevance_check
+from .enhanced_extraction import refine_classification_result, enhanced_extract_all
 
 CATEGORIES = {
     "REJECTION",
@@ -497,3 +499,142 @@ def extract_company_name(subject: str, body: str, sender: str) -> str:
     """Legacy: return only company. Use structured_classify_email for full payload."""
     result = structured_classify_email(subject, body, sender)
     return normalize_company_name(result["company_name"])
+
+
+def classify_with_filtering(
+    subject: str,
+    body: str,
+    sender: str,
+    skip_non_job: bool = True,
+    enhance_extraction: bool = True,
+) -> dict:
+    """
+    Enhanced classification pipeline with filtering and better extraction.
+
+    This is the recommended function for new code. It:
+    1. Filters out non-job emails (billing, newsletters, etc.)
+    2. Classifies job-related emails
+    3. Enhances extraction of company/job title with dedicated LLM calls
+
+    Args:
+        subject: Email subject
+        body: Email body
+        sender: Sender email address
+        skip_non_job: If True, return early with is_relevant=False for non-job emails
+        enhance_extraction: If True, use enhanced LLM extraction for better company/title
+
+    Returns:
+        Dict with:
+            - is_relevant: bool (False if not job-related)
+            - relevance_confidence: float
+            - relevance_reason: str
+            - category, subcategory, company_name, job_title, etc. (if relevant)
+            - summary, key_points, clean_body (if enhance_extraction=True)
+    """
+    # Step 1: Check if email is job-related
+    is_relevant, rel_confidence, rel_reason = is_job_related_email(subject, body, sender)
+
+    if not is_relevant and skip_non_job:
+        return {
+            "is_relevant": False,
+            "relevance_confidence": rel_confidence,
+            "relevance_reason": rel_reason,
+            "category": "NOT_JOB_RELATED",
+            "subcategory": None,
+            "company_name": "Unknown",
+            "job_title": None,
+            "salary_min": None,
+            "salary_max": None,
+            "location": None,
+            "confidence": None,
+        }
+
+    # Step 2: Classify the email
+    result = structured_classify_email(subject, body, sender)
+    result["is_relevant"] = True
+    result["relevance_confidence"] = rel_confidence
+    result["relevance_reason"] = rel_reason
+
+    # Step 3: Enhance extraction if needed
+    if enhance_extraction:
+        result = refine_classification_result(result, subject, body, sender)
+
+    return result
+
+
+def classify_emails_batch_with_filtering(
+    emails: List[Tuple[str, str, str]],
+    skip_non_job: bool = True,
+    enhance_extraction: bool = True,
+) -> List[dict]:
+    """
+    Batch classify emails with filtering and enhanced extraction.
+
+    Args:
+        emails: List of (subject, body, sender) tuples
+        skip_non_job: If True, filter out non-job emails
+        enhance_extraction: If True, enhance extraction for emails with missing fields
+
+    Returns:
+        List of classification results (same length as input, with is_relevant=False for filtered)
+    """
+    results = []
+
+    # First pass: filter non-job emails using fast rules
+    job_email_indices = []
+    for i, (subject, body, sender) in enumerate(emails):
+        # Use fast rule-based check first
+        rule_result = rule_based_relevance_check(subject, body, sender)
+
+        if rule_result is False and skip_non_job:
+            # Definitely not job-related
+            results.append({
+                "is_relevant": False,
+                "relevance_confidence": 0.90,
+                "relevance_reason": "Matches non-job patterns",
+                "category": "NOT_JOB_RELATED",
+                "subcategory": None,
+                "company_name": "Unknown",
+                "job_title": None,
+                "salary_min": None,
+                "salary_max": None,
+                "location": None,
+                "confidence": None,
+            })
+        else:
+            # Relevant or uncertain - need classification
+            job_email_indices.append(i)
+            results.append(None)  # Placeholder
+
+    # Second pass: batch classify job-related emails
+    if job_email_indices:
+        job_emails = [emails[i] for i in job_email_indices]
+
+        # Try batch classification
+        batch_results = structured_classify_emails_batch(job_emails)
+
+        if batch_results and len(batch_results) == len(job_emails):
+            for idx, batch_result in zip(job_email_indices, batch_results):
+                subject, body, sender = emails[idx]
+                batch_result["is_relevant"] = True
+                batch_result["relevance_confidence"] = 0.95
+                batch_result["relevance_reason"] = "Job-related email"
+
+                if enhance_extraction:
+                    batch_result = refine_classification_result(
+                        batch_result, subject, body, sender
+                    )
+
+                results[idx] = batch_result
+        else:
+            # Fallback to individual classification
+            for idx in job_email_indices:
+                subject, body, sender = emails[idx]
+                result = classify_with_filtering(
+                    subject, body, sender,
+                    skip_non_job=skip_non_job,
+                    enhance_extraction=enhance_extraction,
+                )
+                results[idx] = result
+
+    return results

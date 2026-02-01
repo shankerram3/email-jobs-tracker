@@ -89,6 +89,63 @@ def _has_actual_interview_invitation(text: str) -> bool:
     return any(re.search(p, text.lower()) for p in interview_phrases)
 
 
+def _looks_non_job_related(subject: str, body: str, sender: str) -> bool:
+    """Heuristic pre-filter for obvious non-job emails."""
+    text = f"{subject}\n{body}\n{sender}".lower()
+    keywords = [
+        "payment",
+        "invoice",
+        "receipt",
+        "subscription",
+        "billing",
+        "charge",
+        "renewal",
+        "update your payment",
+        "card ending",
+        "plus benefits",
+        "account verification",
+        "security code",
+        "otp",
+        "password reset",
+    ]
+    if any(k in text for k in keywords):
+        return True
+    non_job_domains = [
+        "stripe.com",
+        "openai.com",
+        "paypal.com",
+    ]
+    sender_lower = (sender or "").lower()
+    return any(d in sender_lower for d in non_job_domains)
+
+
+def _llm_relevance_gate(subject: str, body: str, sender: str) -> tuple[bool, str]:
+    """
+    Lightweight LLM gate to decide whether an email is job-related.
+    Returns (is_job_related, reason).
+    """
+    prompt = f"""You are a strict filter for job-search emails.
+Decide if this email is job-related (applications, interviews, recruiter outreach, job alerts) or not.
+Non-job examples: billing, payments, receipts, security codes, generic marketing.
+
+Return ONLY JSON:
+{{"is_job_related": true/false, "reason": "<short reason>"}}
+
+Email:
+Subject: {subject}
+From: {sender}
+Body: {(body or "")[:1200]}
+"""
+    try:
+        response_text = _call_llm(prompt, max_tokens=120, force_json=True)
+        data = _parse_json_response(response_text)
+        is_job_related = bool(data.get("is_job_related"))
+        reason = (data.get("reason") or "").strip()
+        return is_job_related, reason
+    except Exception:
+        return True, ""
+
+
 # =============================================================================
 # Email Categories (14 total)
 # =============================================================================
@@ -452,6 +509,8 @@ SKIP_EXTRACTION_CATEGORIES = {
     "receipts_invoices",
 }
 
+JOB_RELATED_CATEGORIES = set(EMAIL_CATEGORIES.keys()) - SKIP_EXTRACTION_CATEGORIES
+
 
 # =============================================================================
 # State Schema
@@ -569,6 +628,20 @@ def classify_and_extract_node(state: EmailState) -> dict:
     body = state.get("body") or ""
     body_sample = body[:1500]
 
+    if _looks_non_job_related(subject, body, sender):
+        is_job_related, reason = _llm_relevance_gate(subject, body, sender)
+        if not is_job_related:
+            return {
+                "email_class": "promotional_marketing",
+                "confidence": 0.9,
+                "classification_reasoning": reason or "Non-job email detected.",
+                "needs_review": False,
+                "company_name": None,
+                "job_title": None,
+                "position_level": None,
+                "errors": state.get("errors", []),
+            }
+
     # Pre-extract title candidates for context
     title_candidates = get_job_title_candidates(subject=subject, body=body_sample)
     title_candidates_text = "\n".join(f"- {c.value}" for c in title_candidates[:6]) or "- (none found)"
@@ -632,7 +705,17 @@ Return ONLY valid JSON (no markdown):
                     email_class = "job_application_confirmation"
                     reasoning = f"[Override: conditional language, no concrete invite] {reasoning}".strip()
 
+        override_confidence = None
+        if email_class in JOB_RELATED_CATEGORIES and _looks_non_job_related(subject, body, sender):
+            is_job_related, reason = _llm_relevance_gate(subject, body, sender)
+            if not is_job_related:
+                email_class = "promotional_marketing"
+                reasoning = reason or "Non-job email detected."
+                override_confidence = 0.9
+
         confidence = float(result.get("confidence", 0.5))
+        if override_confidence is not None:
+            confidence = max(confidence, override_confidence)
         needs_review = confidence < 0.65
 
         # Skip entity processing for non-job categories
@@ -800,7 +883,17 @@ Return ONLY valid JSON (no markdown):
                     email_class = "job_application_confirmation"
                     reasoning = f"[Override: conditional language, no concrete invite] {reasoning}"
 
+        override_confidence = None
+        if email_class in JOB_RELATED_CATEGORIES and _looks_non_job_related(subject, body, state.get("sender", "")):
+            is_job_related, reason = _llm_relevance_gate(subject, body, state.get("sender", ""))
+            if not is_job_related:
+                email_class = "promotional_marketing"
+                reasoning = reason or "Non-job email detected."
+                override_confidence = 0.9
+
         # Calculate needs_review flag for low-confidence classifications
+        if override_confidence is not None:
+            confidence = max(confidence, override_confidence)
         needs_review = confidence < 0.65
 
         return {
@@ -1225,6 +1318,17 @@ def process_emails_batch(
                         if not _has_actual_interview_invitation(combined_text):
                             email_class = "job_application_confirmation"
                             reasoning = f"[Override: conditional language, no concrete invite] {reasoning}".strip()
+
+                if email_class in JOB_RELATED_CATEGORIES and _looks_non_job_related(
+                    email_data.get("subject", ""), email_data.get("body", ""), email_data.get("sender", "")
+                ):
+                    is_job_related, reason = _llm_relevance_gate(
+                        email_data.get("subject", ""), email_data.get("body", ""), email_data.get("sender", "")
+                    )
+                    if not is_job_related:
+                        email_class = "promotional_marketing"
+                        confidence = max(confidence, 0.9)
+                        reasoning = reason or "Non-job email detected."
 
                 # Accuracy safeguard: reprocess low-confidence critical emails individually
                 if confidence < confidence_threshold and email_class in CRITICAL_CATEGORIES:
