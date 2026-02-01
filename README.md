@@ -198,7 +198,7 @@ Notes:
 | `SQLITE_BUSY_TIMEOUT_MS` | `5000` | Busy timeout for SQLite concurrency. |
 | **Gmail OAuth (sync)** | | |
 | `CREDENTIALS_PATH` | `credentials.json` | Path to Google OAuth client JSON (relative to `backend/` or absolute). |
-| `TOKEN_DIR` | (none) | **Recommended (multi-user):** directory to store per-user Gmail OAuth tokens as `token_<user_id>.pickle` (relative to `backend/` or absolute). When set, Gmail tokens are **user-isolated**. |
+| `TOKEN_DIR` | `gmail_tokens` | **Required for multi-user safety:** directory to store per-user Gmail OAuth tokens as `token_<user_id>.pickle` (relative to `backend/` or absolute). Set to `/data/gmail_tokens` in containers for persistence. |
 | `TOKEN_PATH` | `token.pickle` | **Legacy (single-user only):** path to store a single Gmail OAuth token (file is written with `0o600`). If `TOKEN_DIR` is set, this is ignored for Gmail sync. |
 | `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, `/api/gmail/auth` uses a redirect-based OAuth flow with CSRF `state` and callback at `/api/gmail/callback` (e.g. `https://<your-domain>/api/gmail/callback`). Add this exact URI to your Google OAuth client’s redirect URIs. |
 | `GMAIL_CREDENTIALS_JSON` | (none) | **(Railway/containers)** Paste the full contents of `credentials.json` here; the container entrypoint writes it to `CREDENTIALS_PATH` at startup. |

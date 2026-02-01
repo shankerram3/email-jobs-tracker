@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     # Gmail - paths relative to backend/ or set absolute
     credentials_path: str = "credentials.json"
     token_path: str = "token.pickle"
-    # If set, store per-user Gmail tokens at TOKEN_DIR/token_<user_id>.pickle (recommended for multi-user).
-    token_dir: Optional[str] = None
+    # Store per-user Gmail tokens at TOKEN_DIR/token_<user_id>.pickle.
+    # Default is a local directory under backend/ (good for local dev; set to /data/gmail_tokens in containers for persistence).
+    token_dir: str = "gmail_tokens"
     # If set, OAuth uses this redirect_uri (e.g. http://localhost:8000/api/gmail/callback) for CSRF state validation
     gmail_oauth_redirect_uri: Optional[str] = None
 

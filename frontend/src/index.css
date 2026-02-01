@@ -84,18 +84,22 @@ body {
 /* App shell – Figma layout with sidebar */
 .app-layout {
   display: flex;
+  height: 100vh;
   min-height: 100vh;
   background: var(--bg);
+  overflow: hidden;
 }
 
 .app-sidebar {
   width: 16rem;
+  height: 100vh;
   min-height: 100vh;
   background: var(--bg-elevated);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  overflow: hidden;
 }
 
 .app-sidebar-header {
@@ -143,6 +147,7 @@ body {
   flex-direction: column;
   gap: var(--space-1);
   flex: 1;
+  overflow-y: auto;
 }
 
 .app-sidebar-nav-btn {
@@ -262,6 +267,8 @@ body {
 .app-main {
   flex: 1;
   min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
   padding: var(--space-8) var(--space-6);
   max-width: 80rem;
   margin: 0 auto;
