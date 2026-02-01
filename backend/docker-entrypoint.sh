@@ -20,5 +20,7 @@ if [ "$RUN_MIGRATIONS" = "1" ]; then
 fi
 
 echo "[entrypoint] Starting API..."
-exec python -m uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
+# Trust X-Forwarded-* headers from the platform proxy (Railway/Cloudflare)
+# so request.url.scheme/host are correct for OAuth redirects.
+exec python -m uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-allow-ips="*"
 

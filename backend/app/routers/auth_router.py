@@ -3,7 +3,7 @@ import secrets
 import urllib.parse
 from typing import Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -53,10 +53,35 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-def _google_redirect_uri() -> str:
+def _origin_from_request(request: Request) -> str:
+    """
+    Best-effort origin for redirects (scheme + host).
+
+    Requires uvicorn to trust proxy headers in production (see docker-entrypoint.sh),
+    otherwise request.url.scheme may be "http" behind Cloudflare/Railway.
+    """
+    # Starlette's request.base_url includes a trailing slash.
+    return str(request.base_url).rstrip("/")
+
+
+def _default_frontend_origin(request: Request) -> str:
+    # Prefer the actual request host/scheme, fall back to configured CORS origin.
+    origin = _origin_from_request(request)
+    if origin:
+        return origin
+    return settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+
+
+def _google_redirect_uri(request: Request) -> str:
+    """
+    Redirect URI used for Google OAuth callback.
+
+    IMPORTANT: this must be registered in Google Cloud OAuth client settings.
+    """
     if settings.google_redirect_uri:
         return settings.google_redirect_uri
-    return "http://localhost:8000/api/auth/google/callback"
+    # Reasonable default when deploying the app as a single origin.
+    return f"{_default_frontend_origin(request)}/api/auth/google/callback"
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -111,16 +136,15 @@ async def change_password(
 
 
 @router.get("/auth/google")
-def google_auth_start(redirect_url: Optional[str] = None):
+def google_auth_start(request: Request, redirect_url: Optional[str] = None):
     """Redirect to Google Sign-in. Frontend should link to this or redirect here."""
     if not settings.google_client_id:
         raise HTTPException(
             status_code=500,
             detail="GOOGLE_CLIENT_ID not set. Add it to .env for Sign in with Google.",
         )
-    redirect_uri = _google_redirect_uri()
-    frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
-    after_login = redirect_url or frontend_origin
+    redirect_uri = _google_redirect_uri(request)
+    after_login = redirect_url or _default_frontend_origin(request)
     state = secrets.token_urlsafe(32)
     oauth_state_set(KIND_GOOGLE_LOGIN, state, after_login)
     params = {
@@ -138,6 +162,7 @@ def google_auth_start(redirect_url: Optional[str] = None):
 
 @router.get("/auth/google/callback")
 async def google_auth_callback(
+    request: Request,
     code: Optional[str] = None,
     error: Optional[str] = None,
     state: Optional[str] = None,
@@ -146,19 +171,19 @@ async def google_auth_callback(
     """Exchange code for tokens, get userinfo, find or create user, redirect to frontend with JWT."""
     if error:
         # Redirect to frontend with error (e.g. user denied)
-        frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+        frontend_origin = _default_frontend_origin(request)
         return RedirectResponse(url=f"{frontend_origin}/login?error=access_denied", status_code=302)
     if not state:
-        frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+        frontend_origin = _default_frontend_origin(request)
         return RedirectResponse(url=f"{frontend_origin}/login?error=missing_state", status_code=302)
     entry = oauth_state_consume(state)
     if not entry:
-        frontend_origin = settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
+        frontend_origin = _default_frontend_origin(request)
         return RedirectResponse(url=f"{frontend_origin}/login?error=invalid_state", status_code=302)
     if not code or not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(status_code=400, detail="Missing code or Google OAuth config")
 
-    redirect_uri = _google_redirect_uri()
+    redirect_uri = _google_redirect_uri(request)
 
     # Exchange code for tokens
     try:
@@ -232,5 +257,5 @@ async def google_auth_callback(
     token = create_access_token(user.id, user.email)
 
     # Redirect to frontend with token in fragment (so it isn't sent to server logs)
-    frontend_origin = entry.get("redirect_url") or (settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173")
+    frontend_origin = entry.get("redirect_url") or _default_frontend_origin(request)
     return RedirectResponse(url=f"{frontend_origin}/login#token={token}", status_code=302)
