@@ -25,13 +25,14 @@ services:
       timeout: 3s
       retries: 20
 
-  backend:
+  app:
     build:
-      context: ./backend
+      context: .
     environment:
       # Core runtime
       DATABASE_URL: postgresql://jobtracker:jobtracker@db:5432/jobtracker
       REDIS_URL: redis://redis:6379/0
+      PORT: 8000
 
       # Auth (set at least one; prefer SECRET_KEY)
       SECRET_KEY: ${SECRET_KEY:-}
@@ -67,7 +68,7 @@ services:
 
   worker:
     build:
-      context: ./backend
+      context: .
     command: celery -A app.celery_app worker -l info
     environment:
       DATABASE_URL: postgresql://jobtracker:jobtracker@db:5432/jobtracker
@@ -84,21 +85,12 @@ services:
       - ./backend:/host_backend:ro
       - gmail_data:/data
     depends_on:
-      backend:
+      app:
         condition: service_started
       redis:
         condition: service_healthy
       db:
         condition: service_healthy
-
-  frontend:
-    build:
-      context: ./frontend
-    ports:
-      - "5173:80"
-    depends_on:
-      backend:
-        condition: service_started
 
 volumes:
   postgres_data:
