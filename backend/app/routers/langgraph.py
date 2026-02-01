@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import get_sync_db
 from ..models import Application
 from ..langgraph_pipeline import (
     process_email,
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/langgraph", tags=["LangGraph Classification"])
 def process_single_email(
     email: EmailInput,
     persist: bool = False,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """
     Process a single email through the LangGraph pipeline.
@@ -122,7 +122,7 @@ def process_single_email(
 async def batch_process_emails(
     emails: List[EmailInput],
     persist: bool = False,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """
     Process multiple emails in parallel.
@@ -202,7 +202,7 @@ async def batch_process_emails(
 @router.post("/reprocess/{application_id}", response_model=ApplicationDetailResponse)
 def reprocess_application_endpoint(
     application_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """
     Re-run LangGraph classification on an existing application.
@@ -277,7 +277,7 @@ def list_categories():
 
 
 @router.get("/analytics", response_model=ClassificationAnalytics)
-def get_classification_analytics(db: Session = Depends(get_db)):
+def get_classification_analytics(db: Session = Depends(get_sync_db)):
     """
     Get classification analytics across all processed applications.
     """
@@ -339,7 +339,7 @@ def get_classification_analytics(db: Session = Depends(get_db)):
 @router.get("/action-required", response_model=List[ApplicationDetailResponse])
 def get_action_required(
     limit: int = 20,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """
     Get applications that require user action (interviews, follow-ups, etc.)
@@ -381,7 +381,7 @@ def get_action_required(
 def get_low_confidence(
     threshold: float = 0.7,
     limit: int = 20,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """
     Get applications with low classification confidence for manual review.
@@ -424,7 +424,7 @@ def get_low_confidence(
 def get_by_stage(
     stage: str,
     limit: int = 50,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """
     Get applications by application stage (Applied, Interview, Rejected, etc.)

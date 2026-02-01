@@ -5,7 +5,7 @@ from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
 from ..oauth_state_db import KIND_GOOGLE_LOGIN, oauth_state_set, oauth_state_consume
@@ -60,11 +60,11 @@ def _google_redirect_uri() -> str:
 
 
 @router.post("/login", response_model=TokenResponse)
-def login_email_password(req: LoginRequest, db: Session = Depends(get_db)):
+async def login_email_password(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Login with email and password. Returns JWT. Requires SECRET_KEY."""
     if not settings.secret_key:
         raise HTTPException(status_code=500, detail="SECRET_KEY not set")
-    user = get_user_by_email(db, req.email)
+    user = await get_user_by_email(db, req.email)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.password_hash:
@@ -90,10 +90,10 @@ def me(current_user: User = Depends(get_current_user_required)):
 
 
 @router.post("/me/change-password")
-def change_password(
+async def change_password(
     req: ChangePasswordRequest,
     current_user: User = Depends(get_current_user_required),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Change password. Requires current password. Only for accounts with a password (not Google-only)."""
     if not current_user.password_hash:
@@ -106,7 +106,7 @@ def change_password(
     if len(req.new_password) < 6:
         raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
     current_user.password_hash = hash_password(req.new_password)
-    db.commit()
+    await db.commit()
     return {"message": "Password updated successfully"}
 
 
@@ -137,11 +137,11 @@ def google_auth_start(redirect_url: Optional[str] = None):
 
 
 @router.get("/auth/google/callback")
-def google_auth_callback(
+async def google_auth_callback(
     code: Optional[str] = None,
     error: Optional[str] = None,
     state: Optional[str] = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Exchange code for tokens, get userinfo, find or create user, redirect to frontend with JWT."""
     if error:
@@ -209,13 +209,13 @@ def google_auth_callback(
         raise HTTPException(status_code=400, detail="Google did not return an email")
 
     # Find or create user
-    user = get_user_by_email(db, email)
+    user = await get_user_by_email(db, email)
     if user:
         if not user.google_id:
             user.google_id = google_id
             user.name = user.name or name
-            db.commit()
-            db.refresh(user)
+            await db.commit()
+            await db.refresh(user)
     else:
         user = User(
             email=email,
@@ -224,8 +224,8 @@ def google_auth_callback(
             password_hash=None,
         )
         db.add(user)
-        db.commit()
-        db.refresh(user)
+        await db.commit()
+        await db.refresh(user)
 
     if not settings.secret_key:
         raise HTTPException(status_code=500, detail="SECRET_KEY not set")

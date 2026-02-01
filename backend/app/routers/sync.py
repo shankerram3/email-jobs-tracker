@@ -8,7 +8,7 @@ from sse_starlette.sse import EventSourceResponse
 import asyncio
 import json
 
-from ..database import SessionLocal, get_db
+from ..database import SessionLocal, get_sync_db
 from ..services.email_processor import run_sync_with_options
 from ..sync_state import get_state, set_syncing, update_progress, set_idle, set_error
 from ..sync_state_db import (
@@ -119,7 +119,7 @@ async def sync_emails(
 @router.get("/sync-status")
 def sync_status(
     current_user: User = Depends(get_current_user_required),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_sync_db),
 ):
     """Current sync progress for this user: status, message, processed, total, created, skipped, errors, error."""
     return get_state_from_db(db, current_user.id)

@@ -3,8 +3,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import Application, User
@@ -22,22 +22,38 @@ from ..auth import get_current_user_required
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 
-def _app_query(db: Session, user: User):
-    return db.query(Application).filter(Application.user_id == user.id)
-
-
 @router.get("/funnel", response_model=FunnelResponse)
-def get_funnel(
-    db: Session = Depends(get_db),
+async def get_funnel(
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
     """Funnel: Applied → Interview → Offer (and Rejection branch)."""
-    q = _app_query(db, current_user)
-    total = q.count()
+    total = await db.scalar(
+        select(func.count()).select_from(Application).where(Application.user_id == current_user.id)
+    )
+    total = int(total or 0)
     applied = total
-    interviews = q.filter(Application.application_stage.in_(["Interview", "Screening"])).count()
-    offers = q.filter(Application.application_stage == "Offer").count()
-    rejections = q.filter(Application.application_stage == "Rejected").count()
+    interviews = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(
+            Application.user_id == current_user.id,
+            Application.application_stage.in_(["Interview", "Screening"]),
+        )
+    )
+    offers = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.user_id == current_user.id, Application.application_stage == "Offer")
+    )
+    rejections = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.user_id == current_user.id, Application.application_stage == "Rejected")
+    )
+    interviews = int(interviews or 0)
+    offers = int(offers or 0)
+    rejections = int(rejections or 0)
 
     funnel = [
         FunnelStage(stage="Applied", count=applied, pct=100.0 if total else 0),
@@ -49,29 +65,33 @@ def get_funnel(
 
 
 @router.get("/response-rate", response_model=ResponseRateResponse)
-def get_response_rate(
+async def get_response_rate(
     group_by: str = Query("company", description="company or industry"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
     """Response rate by company or by industry (industry = category for now)."""
-    q = _app_query(db, current_user)
     responded_stage = ["Screening", "Interview", "Offer", "Rejected"]
     if group_by == "industry":
         # Use category as industry proxy
-        rows = (
-            q.with_entities(Application.category, func.count(Application.id).label("cnt"))
+        rows_r = await db.execute(
+            select(Application.category, func.count(Application.id).label("cnt"))
+            .where(Application.user_id == current_user.id)
             .group_by(Application.category)
-            .all()
         )
-        applied = {r.category: r.cnt for r in rows}
-        responded = (
-            q.filter(Application.application_stage.in_(responded_stage))
-            .with_entities(Application.category, func.count(Application.id).label("cnt"))
+        rows = list(rows_r.all())
+        applied = {category: int(cnt or 0) for category, cnt in rows}
+
+        responded_r = await db.execute(
+            select(Application.category, func.count(Application.id).label("cnt"))
+            .where(
+                Application.user_id == current_user.id,
+                Application.application_stage.in_(responded_stage),
+            )
             .group_by(Application.category)
-            .all()
         )
-        responded_d = {r.category: r.cnt for r in responded}
+        responded = list(responded_r.all())
+        responded_d = {category: int(cnt or 0) for category, cnt in responded}
         items = [
             ResponseRateItem(
                 name=cat,
@@ -83,19 +103,23 @@ def get_response_rate(
         ]
     else:
         # By company
-        applied = (
-            q.with_entities(Application.company_name, func.count(Application.id).label("cnt"))
+        applied_r = await db.execute(
+            select(Application.company_name, func.count(Application.id).label("cnt"))
+            .where(Application.user_id == current_user.id)
             .group_by(Application.company_name)
-            .all()
         )
-        responded = (
-            q.filter(Application.application_stage.in_(responded_stage))
-            .with_entities(Application.company_name, func.count(Application.id).label("cnt"))
+        applied = list(applied_r.all())
+        responded_r = await db.execute(
+            select(Application.company_name, func.count(Application.id).label("cnt"))
+            .where(
+                Application.user_id == current_user.id,
+                Application.application_stage.in_(responded_stage),
+            )
             .group_by(Application.company_name)
-            .all()
         )
-        applied_d = {r.company_name: r.cnt for r in applied}
-        responded_d = {r.company_name: r.cnt for r in responded}
+        responded = list(responded_r.all())
+        applied_d = {name: int(cnt or 0) for name, cnt in applied}
+        responded_d = {name: int(cnt or 0) for name, cnt in responded}
         items = [
             ResponseRateItem(
                 name=name,
@@ -121,25 +145,29 @@ def _days_between(start: Optional[datetime], end: Optional[datetime]) -> Optiona
 
 
 @router.get("/time-to-event", response_model=TimeToEventResponse)
-def get_time_to_event(
+async def get_time_to_event(
     event: str = Query("rejection", description="rejection or interview"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
     """Median and average days from received_date to event (rejection or interview)."""
-    q = _app_query(db, current_user)
     if event == "rejection":
-        rows = (
-            q.with_entities(Application.received_date, Application.rejected_at)
-            .filter(Application.rejected_at.isnot(None))
-            .all()
+        rows_r = await db.execute(
+            select(Application.received_date, Application.rejected_at)
+            .where(
+                Application.user_id == current_user.id,
+                Application.rejected_at.isnot(None),
+            )
         )
     else:
-        rows = (
-            q.with_entities(Application.received_date, Application.interview_at)
-            .filter(Application.interview_at.isnot(None))
-            .all()
+        rows_r = await db.execute(
+            select(Application.received_date, Application.interview_at)
+            .where(
+                Application.user_id == current_user.id,
+                Application.interview_at.isnot(None),
+            )
         )
+    rows = list(rows_r.all())
     days_list = []
     for r in rows:
         d = _days_between(r.received_date, r.rejected_at if event == "rejection" else r.interview_at)
@@ -159,7 +187,7 @@ def get_time_to_event(
     )
 
 
-def _run_prediction_model(db: Session, user_id: int, limit: int) -> List[tuple]:
+async def _run_prediction_model(db: AsyncSession, user_id: int, limit: int) -> List[tuple]:
     """Simple logistic regression MVP: features = category one-hot, days_since_received; target = has_offer (or interview)."""
     try:
         from sklearn.linear_model import LogisticRegression
@@ -168,13 +196,13 @@ def _run_prediction_model(db: Session, user_id: int, limit: int) -> List[tuple]:
     except ImportError:
         return []
 
-    rows = (
-        db.query(Application)
-        .filter(Application.user_id == user_id, Application.received_date.isnot(None))
+    rows_r = await db.execute(
+        select(Application)
+        .where(Application.user_id == user_id, Application.received_date.isnot(None))
         .order_by(Application.received_date.desc())
         .limit(500)
-        .all()
     )
+    rows = list(rows_r.scalars().all())
     if len(rows) < 10:
         return []
 
@@ -207,14 +235,14 @@ def _run_prediction_model(db: Session, user_id: int, limit: int) -> List[tuple]:
 
 
 @router.get("/prediction", response_model=PredictionResponse)
-def get_prediction(
+async def get_prediction(
     limit: int = Query(50, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
     """Success prediction (basic logistic regression MVP). Returns application_id, company_name, probability.
     Requires scikit-learn; returns 503 if not installed."""
-    results = _run_prediction_model(db, current_user.id, limit)
+    results = await _run_prediction_model(db, current_user.id, limit)
     if results is None:
         raise HTTPException(
             status_code=503,

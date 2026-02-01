@@ -27,9 +27,13 @@ def _hash_password(password: str) -> str:
 def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
+    table_names = set(inspector.get_table_names())
+
+    def _index_exists(table_name: str, index_name: str) -> bool:
+        return any(idx.get("name") == index_name for idx in inspector.get_indexes(table_name))
 
     # Create users table if it doesn't exist (idempotent: may have been created by init_db)
-    if "users" not in inspector.get_table_names():
+    if "users" not in table_names:
         op.create_table(
             "users",
             sa.Column("id", sa.Integer(), nullable=False),
@@ -41,14 +45,22 @@ def upgrade() -> None:
             sa.Column("updated_at", sa.DateTime(), nullable=True),
             sa.PrimaryKeyConstraint("id"),
         )
-        op.create_index(op.f("ix_users_id"), "users", ["id"], unique=False)
-        op.create_index(op.f("ix_users_email"), "users", ["email"], unique=True)
-        op.create_index(op.f("ix_users_google_id"), "users", ["google_id"], unique=False)
+        table_names.add("users")
+    if "users" in table_names:
+        idx_users_id = op.f("ix_users_id")
+        if not _index_exists("users", idx_users_id):
+            op.create_index(idx_users_id, "users", ["id"], unique=False)
+        idx_users_email = op.f("ix_users_email")
+        if not _index_exists("users", idx_users_email):
+            op.create_index(idx_users_email, "users", ["email"], unique=True)
+        idx_users_google = op.f("ix_users_google_id")
+        if not _index_exists("users", idx_users_google):
+            op.create_index(idx_users_google, "users", ["google_id"], unique=False)
 
     is_sqlite = conn.dialect.name == "sqlite"
 
     # Add user_id to applications if missing (SQLite: no FK via ALTER)
-    if "applications" in inspector.get_table_names():
+    if "applications" in table_names:
         app_cols = {c["name"] for c in inspector.get_columns("applications")}
         if "user_id" not in app_cols:
             op.add_column("applications", sa.Column("user_id", sa.Integer(), nullable=True))
@@ -61,22 +73,18 @@ def upgrade() -> None:
                     ["id"],
                     ondelete="CASCADE",
                 )
-            try:
-                op.create_index(op.f("ix_applications_user_id"), "applications", ["user_id"], unique=False)
-            except Exception:
-                pass
-    try:
-        op.create_index(
-            "ix_applications_user_gmail",
-            "applications",
-            ["user_id", "gmail_message_id"],
-            unique=True,
-        )
-    except Exception:
-        pass
+        # Index on user_id
+        idx_app_user_id = op.f("ix_applications_user_id")
+        if "user_id" in app_cols and not _index_exists("applications", idx_app_user_id):
+            op.create_index(idx_app_user_id, "applications", ["user_id"], unique=False)
+        # Composite unique index if columns exist
+        if {"user_id", "gmail_message_id"}.issubset(app_cols):
+            idx_user_gmail = "ix_applications_user_gmail"
+            if not _index_exists("applications", idx_user_gmail):
+                op.create_index(idx_user_gmail, "applications", ["user_id", "gmail_message_id"], unique=True)
 
     # Add user_id to sync_state if missing (SQLite: no FK via ALTER)
-    if "sync_state" in inspector.get_table_names():
+    if "sync_state" in table_names:
         sync_cols = {c["name"] for c in inspector.get_columns("sync_state")}
         if "user_id" not in sync_cols:
             op.add_column("sync_state", sa.Column("user_id", sa.Integer(), nullable=True))
@@ -89,20 +97,20 @@ def upgrade() -> None:
                     ["id"],
                     ondelete="CASCADE",
                 )
-            try:
-                op.create_index(op.f("ix_sync_state_user_id"), "sync_state", ["user_id"], unique=False)
-            except Exception:
-                pass
+        idx_sync_user = op.f("ix_sync_state_user_id")
+        if "user_id" in sync_cols and not _index_exists("sync_state", idx_sync_user):
+            op.create_index(idx_sync_user, "sync_state", ["user_id"], unique=False)
 
     # Create default user if not exists
     result = conn.execute(sa.text("SELECT id FROM users WHERE email = :email"), {"email": DEFAULT_EMAIL})
     row = result.fetchone()
     if not row:
         password_hash = _hash_password(DEFAULT_PASSWORD)
+        now_expr = "datetime('now')" if is_sqlite else "now()"
         conn.execute(
             sa.text(
                 "INSERT INTO users (email, password_hash, created_at, updated_at) "
-                "VALUES (:email, :password_hash, datetime('now'), datetime('now'))"
+                f"VALUES (:email, :password_hash, {now_expr}, {now_expr})"
             ),
             {"email": DEFAULT_EMAIL, "password_hash": password_hash},
         )
@@ -111,8 +119,10 @@ def upgrade() -> None:
     user_id = row[0] if row else 1
 
     # Assign all existing applications and sync_state rows to this user (where user_id is null)
-    conn.execute(sa.text("UPDATE applications SET user_id = :uid WHERE user_id IS NULL"), {"uid": user_id})
-    conn.execute(sa.text("UPDATE sync_state SET user_id = :uid WHERE user_id IS NULL"), {"uid": user_id})
+    if "applications" in table_names:
+        conn.execute(sa.text("UPDATE applications SET user_id = :uid WHERE user_id IS NULL"), {"uid": user_id})
+    if "sync_state" in table_names:
+        conn.execute(sa.text("UPDATE sync_state SET user_id = :uid WHERE user_id IS NULL"), {"uid": user_id})
 
 
 def downgrade() -> None:

@@ -2,10 +2,14 @@
 import json
 import re
 import logging
+import queue
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Callable, Optional, List, Tuple
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -215,6 +219,36 @@ def _parse_received(received_iso: Optional[str]) -> Optional[datetime]:
 
 
 BATCH_COMMIT_SIZE = 50
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "database is locked" in msg or "sqlite_busy" in msg
+
+
+def _commit_with_retry(db: Session, *, max_retries: int = 6, base_sleep_s: float = 0.05) -> None:
+    """
+    SQLite can transiently raise 'database is locked' during concurrent access.
+    Retry commits with exponential backoff + jitter.
+    """
+    attempt = 0
+    while True:
+        try:
+            db.commit()
+            return
+        except OperationalError as e:
+            db.rollback()
+            if attempt >= max_retries or not _is_sqlite_locked_error(e):
+                raise
+            sleep_s = min(2.0, base_sleep_s * (2 ** attempt)) + random.uniform(0, 0.05)
+            time.sleep(sleep_s)
+            attempt += 1
+
+
+def _chunk_list(items: list, chunk_size: int) -> list[list]:
+    if chunk_size <= 0:
+        return [items]
+    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
 def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: str) -> Optional[dict]:
@@ -589,6 +623,7 @@ def run_sync_with_options(
 
         pending.append((i, mid, subject, sender, body, received_iso))
 
+<<<<<<< Updated upstream
     # Phase 2: LangGraph classification (batch + parallel fallback)
     llm_results: dict[int, Tuple[Optional[dict], Optional[Exception]]] = {}
     max_concurrency = max(1, getattr(settings, "classification_max_concurrency", 15))
@@ -657,32 +692,61 @@ def run_sync_with_options(
                 for fut in as_completed(futures):
                     idx, result, err = fut.result()
                     llm_results[idx] = (result, err)
-
-    # Phase 3: persist cache, duplicate check, create applications (main thread, same DB session)
+=======
+    # Phase 2+3: shard into batches, run LangGraph in worker threads, persist in a single-writer loop.
     processed_so_far = total - len(pending)
-    for item in sorted(pending, key=lambda x: x[0]):
-        idx, mid, subject, sender, body, received_iso = item
-        result, err = llm_results.get(idx, (None, None))
-        processed_so_far += 1
-        progress(processed_so_far, total, "Classifying…")
+    progress(processed_so_far, total, "Classifying…")
 
-        if err is not None:
-            logger.error(f"Email {idx+1}/{total}: Classification failed - {str(err)[:100]}")
-            db.add(EmailLog(gmail_message_id=mid, user_id=user_id, error=str(err), classification=None))
-            db.commit()
-            errors += 1
-            continue
+    # Use a dedicated worker count for ingestion (can be higher than batch size).
+    # If unset, fall back to existing classification concurrency.
+    ingestion_workers = max(1, int(getattr(settings, "ingestion_workers", 0) or getattr(settings, "classification_max_concurrency", 5)))
+    ingestion_batch_size = max(1, int(getattr(settings, "ingestion_batch_size", 0) or 25))
 
-        try:
-            structured = dict(result or {})
-            _persist_langgraph_state_to_cache(db, subject, sender, body, structured, commit=False)
-        except Exception as e:
-            logger.error(f"Email {idx+1}/{total}: Cache persist failed - {str(e)[:100]}")
-            db.add(EmailLog(gmail_message_id=mid, user_id=user_id, error=str(e), classification=None))
-            db.commit()
-            errors += 1
-            continue
+    results_q: "queue.Queue[tuple[str, PendingItem, Optional[dict], Optional[str]]]" = queue.Queue()
 
+    def _worker(worker_id: int, batch_indices: list[int], batches: list[list[PendingItem]]) -> None:
+        for bidx in batch_indices:
+            batch = batches[bidx]
+            for item in batch:
+                idx, mid, subject, sender, body, received_iso = item
+                try:
+                    result = langgraph_process_email(
+                        email_id=mid,
+                        subject=subject,
+                        body=body,
+                        sender=sender,
+                        received_date=received_iso or "",
+                    )
+                    results_q.put(("ok", item, dict(result or {}), None))
+                except Exception as e:
+                    results_q.put(("err", item, None, str(e)))
+
+    if pending:
+        batches: list[list[PendingItem]] = _chunk_list(sorted(pending, key=lambda x: x[0]), ingestion_batch_size)
+        worker_count = min(ingestion_workers, max(1, len(batches)))
+        # Assign batch indices round-robin: batch_index % worker_count.
+        assignments: list[list[int]] = [[] for _ in range(worker_count)]
+        for bidx in range(len(batches)):
+            assignments[bidx % worker_count].append(bidx)
+>>>>>>> Stashed changes
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(_worker, wid, assignments[wid], batches) for wid in range(worker_count)]
+
+            # Single-writer persistence loop on the main thread.
+            active = True
+            while active:
+                # If workers are done and queue is empty, we're done.
+                if all(f.done() for f in futures) and results_q.empty():
+                    active = False
+                    continue
+
+                try:
+                    kind, item, structured, err_text = results_q.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+
+<<<<<<< Updated upstream
         received = _parse_received(received_iso)
         email_class = structured.get("email_class")
         company_name = structured.get("company_name") or "Unknown"
@@ -701,9 +765,76 @@ def run_sync_with_options(
         if pending_commits >= BATCH_COMMIT_SIZE:
             db.commit()
             pending_commits = 0
+=======
+                idx, mid, subject, sender, body, received_iso = item
+                processed_so_far += 1
+                progress(processed_so_far, total, "Classifying…")
+
+                if kind == "err":
+                    logger.error(f"Email {idx+1}/{total}: Classification failed - {(err_text or '')[:120]}")
+                    try:
+                        with db.begin_nested():
+                            db.add(EmailLog(gmail_message_id=mid, user_id=user_id, error=err_text, classification=None))
+                            db.flush()
+                    except Exception:
+                        db.rollback()
+                    errors += 1
+                    # Commit error logs in batches too.
+                    pending_commits += 1
+                    if pending_commits >= BATCH_COMMIT_SIZE:
+                        _commit_with_retry(db, max_retries=6)
+                        pending_commits = 0
+                    continue
+
+                # Persist cache + application creation in a savepoint so IntegrityError doesn't nuke the whole batch.
+                try:
+                    with db.begin_nested():
+                        _persist_langgraph_state_to_cache(db, subject, sender, body, structured or {}, commit=False)
+
+                        received = _parse_received(received_iso)
+                        email_class = (structured or {}).get("email_class")
+                        company_name = (structured or {}).get("company_name") or "Unknown"
+                        job_title = (structured or {}).get("job_title")
+
+                        if email_class in APPLICATION_LIKE_CLASSES and _is_duplicate_application(
+                            db, company_name, job_title, received, user_id
+                        ):
+                            skipped += 1
+                            skipped_duplicate += 1
+                        else:
+                            _create_application_and_log(
+                                db, mid, user_id, structured or {}, subject, sender, body, received, commit=False
+                            )
+                            db.flush()
+                            created += 1
+                except IntegrityError:
+                    # Likely concurrent insert of same gmail_message_id; treat as already existing.
+                    db.rollback()
+                    skipped += 1
+                    skipped_existing += 1
+                except OperationalError as e:
+                    db.rollback()
+                    if _is_sqlite_locked_error(e):
+                        # Re-queue once to retry later; writer loop stays single-threaded.
+                        results_q.put(("ok", item, structured, None))
+                        time.sleep(0.05)
+                        continue
+                    logger.error(f"Email {idx+1}/{total}: DB write failed - {str(e)[:120]}")
+                    errors += 1
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"Email {idx+1}/{total}: Persist failed - {str(e)[:120]}")
+                    errors += 1
+
+                pending_commits += 1
+                if pending_commits >= BATCH_COMMIT_SIZE:
+                    _commit_with_retry(db, max_retries=6)
+                    pending_commits = 0
+>>>>>>> Stashed changes
 
     if pending_commits > 0:
-        db.commit()
+        _commit_with_retry(db, max_retries=6)
+        pending_commits = 0
 
     now = datetime.utcnow()
     if new_history_id:
@@ -716,7 +847,7 @@ def run_sync_with_options(
         row.updated_at = now
     else:
         db.add(SyncMetadata(key=LAST_SYNCED_AT_KEY, value=now.isoformat()))
-    db.commit()
+    _commit_with_retry(db, max_retries=6)
 
     logger.info(f"=== SYNC COMPLETE ===")
     logger.info(f"Total emails processed: {total}")

@@ -6,7 +6,8 @@ from fastapi import Depends, HTTPException, status, Query
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .database import get_db
@@ -56,16 +57,18 @@ def verify_token(token: str) -> Optional[TokenData]:
         return None
 
 
-def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
-    return db.query(User).filter(User.id == user_id).first()
+async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalars().first()
 
 
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    return db.query(User).filter(User.email == email).first()
+async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
+    result = await db.execute(select(User).where(User.email == email))
+    return result.scalars().first()
 
 
 async def get_current_user(
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
     api_key: Optional[str] = Depends(api_key_header),
 ) -> Optional[User]:
@@ -73,7 +76,7 @@ async def get_current_user(
     # API key: map to configured user or first user (backward compat)
     if settings.api_key and api_key and api_key == settings.api_key:
         if settings.api_key_user_id is not None:
-            user = get_user_by_id(db, settings.api_key_user_id)
+            user = await get_user_by_id(db, settings.api_key_user_id)
             if user:
                 return user
             raise HTTPException(
@@ -81,7 +84,8 @@ async def get_current_user(
                 detail="API key user not found",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        user = db.query(User).order_by(User.id).first()
+        result = await db.execute(select(User).order_by(User.id).limit(1))
+        user = result.scalars().first()
         if user:
             return user
     # JWT
@@ -90,7 +94,7 @@ async def get_current_user(
         if data and data.sub:
             try:
                 uid = int(data.sub)
-                user = get_user_by_id(db, uid)
+                user = await get_user_by_id(db, uid)
                 if user:
                     return user
             except ValueError:
@@ -120,7 +124,7 @@ async def get_current_user_required(
 
 async def get_current_user_for_sse(
     token: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
     api_key: Optional[str] = Depends(api_key_header),
 ) -> User:
@@ -130,7 +134,7 @@ async def get_current_user_for_sse(
         if data and data.sub:
             try:
                 uid = int(data.sub)
-                user = get_user_by_id(db, uid)
+                user = await get_user_by_id(db, uid)
                 if user:
                     return user
             except ValueError:

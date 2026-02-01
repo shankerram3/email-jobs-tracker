@@ -10,6 +10,17 @@ class Settings(BaseSettings):
     # Database - default SQLite for easy local dev; use DATABASE_URL for PostgreSQL
     database_url: str = "sqlite:///./job_tracker.db"
 
+    # Optional: explicit CA bundle for Supabase (asyncpg SSL verification).
+    # If set to a relative path, it's resolved relative to backend/.
+    supabase_ssl_ca_file: Optional[str] = None
+
+    # SQLAlchemy pooling (Postgres only). When using Supabase pooler/transaction URL,
+    # keep these modest to avoid opening too many server connections.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout_s: int = 30
+    db_pool_recycle_s: int = 1800
+
     # Gmail - paths relative to backend/ or set absolute
     credentials_path: str = "credentials.json"
     token_path: str = "token.pickle"
@@ -64,6 +75,15 @@ class Settings(BaseSettings):
     classification_use_batch_prompt: bool = True
     # Minimum confidence for batch results; low-confidence critical emails reprocessed individually
     classification_batch_confidence_threshold: float = 0.6
+
+    # Ingestion tuning (multithreaded classification + single-writer persistence)
+    # Number of worker threads to run LangGraph calls (batches are sharded round-robin).
+    ingestion_workers: int = 6
+    # Number of emails per batch shard assigned to a worker.
+    ingestion_batch_size: int = 25
+
+    # SQLite concurrency tuning (used when DATABASE_URL starts with sqlite://)
+    sqlite_busy_timeout_ms: int = 5000
 
     class Config:
         env_file = ".env"

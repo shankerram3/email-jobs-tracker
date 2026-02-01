@@ -2,7 +2,8 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import or_
+from sqlalchemy import or_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import Application
@@ -20,22 +21,35 @@ from ..models import User
 router = APIRouter(prefix="/api", tags=["applications"])
 
 
-def _app_query(db, user: User):
-    return db.query(Application).filter(Application.user_id == user.id)
-
-
 @router.get("/stats", response_model=ApplicationStats)
-def get_stats(
-    db=Depends(get_db),
+async def get_stats(
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
-    q = _app_query(db, current_user)
-    total = q.count()
+    total = await db.scalar(
+        select(func.count()).select_from(Application).where(Application.user_id == current_user.id)
+    )
+    total = int(total or 0)
 
     # Stage-based stats (category now holds the 14 LangGraph classes).
-    rejections = q.filter(Application.application_stage == "Rejected").count()
-    offers = q.filter(Application.application_stage == "Offer").count()
-    screening_requests = q.filter(Application.application_stage == "Screening").count()
+    rejections = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.user_id == current_user.id, Application.application_stage == "Rejected")
+    )
+    offers = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.user_id == current_user.id, Application.application_stage == "Offer")
+    )
+    screening_requests = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.user_id == current_user.id, Application.application_stage == "Screening")
+    )
+    rejections = int(rejections or 0)
+    offers = int(offers or 0)
+    screening_requests = int(screening_requests or 0)
 
     # Split interview vs assessment heuristically within interview_assessment.
     assessment_terms = [
@@ -57,12 +71,26 @@ def get_stats(
             for t in assessment_terms
         ]
     )
-    assessments = q.filter(Application.category == "interview_assessment").filter(assessment_like).count()
-    interviews = (
-        q.filter(Application.application_stage == "Interview")
-        .filter(~assessment_like)
-        .count()
+    assessments = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(
+            Application.user_id == current_user.id,
+            Application.category == "interview_assessment",
+            assessment_like,
+        )
     )
+    interviews = await db.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(
+            Application.user_id == current_user.id,
+            Application.application_stage == "Interview",
+            ~assessment_like,
+        )
+    )
+    assessments = int(assessments or 0)
+    interviews = int(interviews or 0)
 
     pending = total - (rejections + interviews + screening_requests + assessments + offers)
     return ApplicationStats(
@@ -77,14 +105,14 @@ def get_stats(
 
 
 @router.get("/applications", response_model=PaginatedApplications)
-def get_applications(
+async def get_applications(
     status: Optional[str] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
-    query = _app_query(db, current_user)
+    where_clause = (Application.user_id == current_user.id)
     if status and status != "ALL":
         # Backward compatible filters for the old UI + new stage/category filters.
         assessment_terms = [
@@ -108,61 +136,68 @@ def get_applications(
         )
 
         if status == "INTERVIEW_OR_SCREENING":
-            query = query.filter(Application.application_stage.in_(["Interview", "Screening"]))
+            where_clause = where_clause & Application.application_stage.in_(["Interview", "Screening"])
         elif status == "ASSESSMENT":
-            query = (
-                query.filter(Application.category == "interview_assessment")
-                .filter(assessment_like)
-            )
+            where_clause = where_clause & (Application.category == "interview_assessment") & assessment_like
         elif status in ("REJECTION", "REJECTED"):
-            query = query.filter(Application.application_stage == "Rejected")
+            where_clause = where_clause & (Application.application_stage == "Rejected")
         elif status == "OFFER":
-            query = query.filter(Application.application_stage == "Offer")
+            where_clause = where_clause & (Application.application_stage == "Offer")
         elif status == "APPLIED":
-            query = query.filter(Application.application_stage == "Applied")
+            where_clause = where_clause & (Application.application_stage == "Applied")
         elif status == "SCREENING":
-            query = query.filter(Application.application_stage == "Screening")
+            where_clause = where_clause & (Application.application_stage == "Screening")
         elif status == "INTERVIEW":
-            query = query.filter(Application.application_stage == "Interview")
+            where_clause = where_clause & (Application.application_stage == "Interview")
         elif status in ("CONTACTED", "PIPELINE", "OTHER"):
-            query = query.filter(Application.application_stage == status.title())
+            where_clause = where_clause & (Application.application_stage == status.title())
         elif status in EMAIL_CATEGORIES:
             # Category filter for 14 classes.
-            query = query.filter(Application.category == status)
+            where_clause = where_clause & (Application.category == status)
         else:
             # Fall back to treating it as stage name if it matches.
-            query = query.filter(Application.application_stage == status)
-    total = query.count()
-    applications = (
-        query.order_by(Application.received_date.desc().nulls_last())
+            where_clause = where_clause & (Application.application_stage == status)
+
+    total = await db.scalar(select(func.count()).select_from(Application).where(where_clause))
+    total = int(total or 0)
+    result = await db.execute(
+        select(Application)
+        .where(where_clause)
+        .order_by(Application.received_date.desc().nulls_last())
         .offset(offset)
         .limit(limit)
-        .all()
     )
+    applications = list(result.scalars().all())
     return PaginatedApplications(items=applications, total=total, offset=offset, limit=limit)
 
 
 @router.get("/applications/{application_id}", response_model=ApplicationResponse)
-def get_application(
+async def get_application(
     application_id: int,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
-    app = _app_query(db, current_user).filter(Application.id == application_id).first()
+    result = await db.execute(
+        select(Application).where(Application.user_id == current_user.id, Application.id == application_id)
+    )
+    app = result.scalars().first()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
     return app
 
 
 @router.post("/applications/{application_id}/schedule")
-def schedule_application(
+async def schedule_application(
     application_id: int,
     body: ScheduleRequest,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
     """Calendar integration: schedule event (placeholder; integrate Google Calendar when configured)."""
-    app = _app_query(db, current_user).filter(Application.id == application_id).first()
+    result = await db.execute(
+        select(Application).where(Application.user_id == current_user.id, Application.id == application_id)
+    )
+    app = result.scalars().first()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
     # TODO: call Google Calendar API when credentials available
@@ -175,14 +210,17 @@ def schedule_application(
 
 
 @router.post("/applications/{application_id}/respond")
-def respond_application(
+async def respond_application(
     application_id: int,
     body: RespondRequest,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
     """Auto-response placeholder (e.g. send reply via Gmail when implemented)."""
-    app = _app_query(db, current_user).filter(Application.id == application_id).first()
+    result = await db.execute(
+        select(Application).where(Application.user_id == current_user.id, Application.id == application_id)
+    )
+    app = result.scalars().first()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
     return {
