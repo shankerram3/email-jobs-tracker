@@ -1,7 +1,7 @@
 """Email sync API: POST sync with mode, GET sync-status, GET sync-events (SSE), Gmail OAuth."""
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy.orm import Session
 from fastapi.responses import RedirectResponse
 from sse_starlette.sse import EventSourceResponse
@@ -30,6 +30,10 @@ from ..gmail_service import (
 )
 
 router = APIRouter(prefix="/api", tags=["sync"])
+
+def _origin_from_request(request: Request) -> str:
+    # request.base_url includes trailing slash
+    return str(request.base_url).rstrip("/")
 
 
 def _run_sync_task(mode: str, user_id: int, after_date: Optional[str] = None, before_date: Optional[str] = None):
@@ -65,13 +69,13 @@ def _run_sync_task(mode: str, user_id: int, after_date: Optional[str] = None, be
 
 
 @router.get("/gmail/auth")
-def gmail_auth(redirect_url: Optional[str] = None):
+def gmail_auth(request: Request, redirect_url: Optional[str] = None):
     """
     Complete Gmail OAuth in the browser. Open this URL in your browser to sign in;
-    after that, Sync will work without blocking. Optional: ?redirect_url=http://localhost:5173
+    after that, Sync will work without blocking. Optional: ?redirect_url=https://<your-domain>
     When GMAIL_OAUTH_REDIRECT_URI is set, uses CSRF state; add GET /api/gmail/callback as redirect URI in Google Cloud.
     """
-    redirect_after = redirect_url or "http://localhost:5173"
+    redirect_after = redirect_url or _origin_from_request(request)
     try:
         if settings.gmail_oauth_redirect_uri:
             auth_url = start_gmail_oauth(redirect_url_after=redirect_after)

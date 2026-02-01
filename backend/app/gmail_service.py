@@ -96,7 +96,8 @@ def finish_gmail_oauth(code: str, state: str) -> str:
     entry = oauth_state_consume(state)
     if not entry:
         raise ValueError("Invalid or expired OAuth state")
-    redirect_url = entry.get("redirect_url", "http://localhost:5173")
+    # Always prefer stored redirect_url; fall back to configured CORS origin (prod-safe) then localhost.
+    redirect_url = entry.get("redirect_url") or (settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173")
     creds_path = _resolve_path(settings.credentials_path)
     token_path = _resolve_path(settings.token_path)
     flow = InstalledAppFlow.from_client_secrets_file(
