@@ -6,8 +6,10 @@ import secrets
 import time
 import re
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
-from typing import Optional
+from typing import Optional, List, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +289,78 @@ def fetch_emails(service, query: str, max_results: int = 100):
         if not page_token or len(all_emails) >= max_results:
             break
     logger.info(f"    Finished: {len(all_emails)} total messages")
+    return all_emails
+
+
+def fetch_emails_parallel(
+    service,
+    queries: List[str],
+    max_results_per_query: int = 100,
+    max_workers: int = 7,
+    on_progress: Optional[Callable[[int, str], None]] = None,
+) -> List[dict]:
+    """
+    Fetch emails from multiple Gmail queries in parallel.
+    Returns deduplicated list of full email messages.
+
+    Args:
+        service: Gmail API service instance
+        queries: List of Gmail search queries to run in parallel
+        max_results_per_query: Max results for each query
+        max_workers: Number of parallel threads (default 7 for 7 queries)
+        on_progress: Optional callback(count, message) for progress updates
+
+    Returns:
+        List of unique email dicts (deduplicated by message ID)
+    """
+    all_emails: List[dict] = []
+    seen_ids: set[str] = set()
+    results_lock = threading.Lock()
+    query_errors: List[str] = []
+
+    def fetch_one(query: str, query_idx: int):
+        """Fetch emails for a single query."""
+        try:
+            emails = fetch_emails(service, query, max_results=max_results_per_query)
+            return (query_idx, emails, None)
+        except Exception as e:
+            return (query_idx, [], str(e))
+
+    logger.info(f"Starting parallel fetch of {len(queries)} queries with {max_workers} workers")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(fetch_one, q, i): (i, q)
+            for i, q in enumerate(queries)
+        }
+
+        for future in as_completed(futures):
+            idx, emails, error = future.result()
+
+            if error:
+                logger.error(f"Query {idx+1}/{len(queries)} failed: {error}")
+                query_errors.append(error)
+                continue
+
+            new_count = 0
+            with results_lock:
+                for email in emails:
+                    msg_id = email.get("id")
+                    if msg_id and msg_id not in seen_ids:
+                        seen_ids.add(msg_id)
+                        all_emails.append(email)
+                        new_count += 1
+
+            logger.info(f"Query {idx+1}/{len(queries)}: {len(emails)} emails, {new_count} unique (total: {len(all_emails)})")
+
+            if on_progress:
+                on_progress(len(all_emails), f"Query {idx+1}/{len(queries)} complete")
+
+    logger.info(f"Parallel fetch complete: {len(all_emails)} unique emails from {len(queries)} queries")
+
+    if query_errors and not all_emails:
+        raise Exception(f"All queries failed: {query_errors[0]}")
+
     return all_emails
 
 

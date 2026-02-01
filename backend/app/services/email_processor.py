@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 from ..gmail_service import (
     get_gmail_service,
     fetch_emails,
+    fetch_emails_parallel,
     fetch_emails_from_history,
     get_profile_history_id,
     email_to_parts,
@@ -27,8 +28,16 @@ from ..sync_state_db import (
     set_memory_progress,
 )
 from .classification_service import normalize_company_with_db
+from .redis_cache import (
+    get_cached_classification_redis,
+    set_cached_classification_redis,
+)
 from ..email_classifier import content_hash
-from ..langgraph_pipeline import process_email as langgraph_process_email, EMAIL_CATEGORIES
+from ..langgraph_pipeline import (
+    process_email as langgraph_process_email,
+    process_emails_batch as langgraph_process_batch,
+    EMAIL_CATEGORIES,
+)
 
 LAST_SYNCED_AT_KEY = "last_synced_at"
 DUPLICATE_DAYS_WINDOW = 14
@@ -39,6 +48,103 @@ APPLICATION_LIKE_CLASSES = {
     "interview_assessment",
     "application_followup",
 }
+
+
+class DuplicateDetector:
+    """
+    In-memory duplicate detection with preloaded recent applications.
+    Replaces per-email DB queries with a single bulk query at sync start.
+    """
+
+    def __init__(self, db: Session, user_id: Optional[int], window_days: int = DUPLICATE_DAYS_WINDOW):
+        self.db = db
+        self.user_id = user_id
+        self.window_days = window_days
+        # company_key -> set of (title_key,)
+        self._cache: dict[str, set[str]] = {}
+        self._loaded = False
+
+    def preload(self, reference_date: Optional[datetime] = None):
+        """Preload recent applications into memory with a single DB query."""
+        if self._loaded:
+            return
+
+        window_start = (reference_date or datetime.utcnow()) - timedelta(days=self.window_days)
+
+        q = self.db.query(
+            Application.company_name,
+            Application.job_title,
+            Application.position,
+        ).filter(
+            Application.received_date >= window_start,
+            Application.company_name.isnot(None),
+            Application.company_name != "Unknown",
+        )
+
+        if self.user_id is not None:
+            q = q.filter(Application.user_id == self.user_id)
+
+        for row in q.all():
+            company = (row.company_name or "").lower().strip()
+            if not company:
+                continue
+
+            if company not in self._cache:
+                self._cache[company] = set()
+
+            # Store both job_title and position (legacy field)
+            title = (row.job_title or row.position or "").lower().strip()
+            self._cache[company].add(title)
+
+        self._loaded = True
+        logger.debug(f"DuplicateDetector: Preloaded {len(self._cache)} companies")
+
+    def is_duplicate(
+        self,
+        company_name: str,
+        job_title: Optional[str],
+        received: Optional[datetime] = None,
+    ) -> bool:
+        """Check if application is duplicate based on preloaded data."""
+        if not company_name or company_name == "Unknown":
+            return False
+
+        self.preload(received)
+
+        company_key = company_name.lower().strip()
+        if company_key not in self._cache:
+            return False
+
+        title_key = (job_title or "").lower().strip()
+
+        # Check for matching company + title combination
+        cached_titles = self._cache[company_key]
+
+        # If no title specified, any match with this company is a duplicate
+        if not title_key:
+            return len(cached_titles) > 0
+
+        # Check if title matches any cached title
+        if title_key in cached_titles:
+            return True
+
+        # Also check if empty title exists (matches anything)
+        if "" in cached_titles:
+            return True
+
+        return False
+
+    def add_application(self, company_name: str, job_title: Optional[str]):
+        """Add newly created application to cache to prevent duplicates within same batch."""
+        company_key = (company_name or "").lower().strip()
+        if not company_key or company_key == "unknown":
+            return
+
+        if company_key not in self._cache:
+            self._cache[company_key] = set()
+
+        title_key = (job_title or "").lower().strip()
+        self._cache[company_key].add(title_key)
 
 
 def _extract_linkedin_url(text: str) -> Optional[str]:
@@ -112,8 +218,20 @@ BATCH_COMMIT_SIZE = 50
 
 
 def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: str) -> Optional[dict]:
-    """Return cached LangGraph state if present and valid; otherwise None."""
+    """
+    Return cached LangGraph state if present and valid; otherwise None.
+    Checks Redis L1 cache first, then falls back to database.
+    """
     h = content_hash(subject, sender, body)
+
+    # L1: Try Redis cache first (sub-millisecond lookup)
+    redis_cached = get_cached_classification_redis(h)
+    if redis_cached:
+        email_class = (redis_cached.get("email_class") or "").strip()
+        if email_class in EMAIL_CATEGORIES:
+            return redis_cached
+
+    # L2: Fall back to database
     row = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
     if not row or not row.raw_json:
         return None
@@ -124,18 +242,29 @@ def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: st
     email_class = (data.get("email_class") or "").strip()
     if email_class not in EMAIL_CATEGORIES:
         return None
+
+    # Populate Redis cache for next time
+    set_cached_classification_redis(h, data)
+
     return data
 
 
 def _persist_langgraph_state_to_cache(
     db: Session, subject: str, sender: str, body: str, state: dict, commit: bool = False
 ) -> None:
-    """Upsert LangGraph state into `classification_cache` by content_hash."""
+    """
+    Upsert LangGraph state into classification cache (Redis + DB).
+    Writes to both Redis L1 and database L2 for consistency.
+    """
     h = content_hash(subject, sender, body)
     email_class = (state.get("email_class") or "").strip()
     if email_class not in EMAIL_CATEGORIES:
         email_class = "promotional_marketing"
 
+    # Write to Redis L1 cache
+    set_cached_classification_redis(h, state)
+
+    # Write to database L2 cache
     raw_json = json.dumps(state)
     existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
     if existing:
@@ -371,26 +500,25 @@ def run_sync_with_options(
                 f"{date_prefix} (\"application received\" OR \"application status\" OR \"interview invitation\" OR \"phone screen\" OR \"technical interview\")",
             ]
 
-            logger.info(f"Running {len(queries)} Gmail queries...")
-            seen_ids = set()
-            fetch_error = None
-            for idx, q in enumerate(queries, 1):
-                try:
-                    logger.info(f"Query {idx}/{len(queries)}: running...")
-                    emails = fetch_emails(service, q, max_results=settings.gmail_full_sync_max_per_query)
-                    logger.info(f"  → Found {len(emails)} emails")
-                    new_emails = 0
-                    for e in emails:
-                        if e.get("id") and e["id"] not in seen_ids:
-                            seen_ids.add(e["id"])
-                            all_emails.append(e)
-                            new_emails += 1
-                    logger.info(f"  → {new_emails} unique emails (total unique so far: {len(all_emails)})")
-                except Exception as e:
-                    fetch_error = str(e)
-                    logger.error(f"  → Query failed: {fetch_error}")
-                    if not all_emails:
-                        return {"error": f"Gmail fetch failed: {fetch_error}", "processed": 0, "created": 0, "skipped": 0, "errors": 0, "full_sync": True}
+            logger.info(f"Running {len(queries)} Gmail queries in parallel...")
+
+            def gmail_progress(count: int, msg: str):
+                progress(count, 0, f"Fetching emails: {msg}")
+
+            try:
+                all_emails = fetch_emails_parallel(
+                    service,
+                    queries,
+                    max_results_per_query=settings.gmail_full_sync_max_per_query,
+                    max_workers=min(7, len(queries)),
+                    on_progress=gmail_progress,
+                )
+                logger.info(f"Parallel fetch complete: {len(all_emails)} unique emails")
+            except Exception as e:
+                fetch_error = str(e)
+                logger.error(f"Gmail parallel fetch failed: {fetch_error}")
+                return {"error": f"Gmail fetch failed: {fetch_error}", "processed": 0, "created": 0, "skipped": 0, "errors": 0, "full_sync": True}
+
             if not new_history_id:
                 new_history_id = get_profile_history_id(service)
             full_sync = True
@@ -405,6 +533,10 @@ def run_sync_with_options(
     skipped_existing = 0
     skipped_duplicate = 0
     pending_commits = 0
+
+    # Preload duplicate detector for in-memory duplicate checking (single DB query)
+    duplicate_detector = DuplicateDetector(db, user_id)
+    duplicate_detector.preload()
 
     # Phase 1: parse, check existing, check cache; collect pending (cache misses) for LangGraph
     PendingItem = Tuple[int, str, str, str, str, str]  # (idx, mid, subject, sender, body, received_iso)
@@ -438,7 +570,7 @@ def run_sync_with_options(
             email_class = cached.get("email_class")
             company_name = cached.get("company_name") or "Unknown"
             job_title = cached.get("job_title")
-            if email_class in APPLICATION_LIKE_CLASSES and _is_duplicate_application(db, company_name, job_title, received, user_id):
+            if email_class in APPLICATION_LIKE_CLASSES and duplicate_detector.is_duplicate(company_name, job_title, received):
                 logger.info(f"Email {i+1}/{total}: DUPLICATE (msg_id={mid})")
                 skipped += 1
                 skipped_duplicate += 1
@@ -446,6 +578,7 @@ def run_sync_with_options(
                 _create_application_and_log(
                     db, mid, user_id, cached, subject, sender, body, received, commit=False
                 )
+                duplicate_detector.add_application(company_name, job_title)
                 created += 1
                 pending_commits += 1
                 if pending_commits >= BATCH_COMMIT_SIZE:
@@ -456,11 +589,14 @@ def run_sync_with_options(
 
         pending.append((i, mid, subject, sender, body, received_iso))
 
-    # Phase 2: parallel LangGraph for pending (per-email)
+    # Phase 2: LangGraph classification (batch + parallel fallback)
     llm_results: dict[int, Tuple[Optional[dict], Optional[Exception]]] = {}
-    max_concurrency = max(1, getattr(settings, "classification_max_concurrency", 5))
+    max_concurrency = max(1, getattr(settings, "classification_max_concurrency", 15))
+    batch_size = max(1, getattr(settings, "classification_batch_size", 10))
+    use_batch = getattr(settings, "classification_use_batch_prompt", True)
 
     def _run_langgraph(item: PendingItem) -> Tuple[int, Optional[dict], Optional[Exception]]:
+        """Fallback: process single email."""
         idx, mid, subject, sender, body, received_iso = item
         try:
             result = langgraph_process_email(
@@ -476,11 +612,51 @@ def run_sync_with_options(
 
     if pending:
         progress(total - len(pending), total, "Classifying…")
-        with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-            futures = {executor.submit(_run_langgraph, item): item for item in pending}
-            for fut in as_completed(futures):
-                idx, result, err = fut.result()
-                llm_results[idx] = (result, err)
+
+        if use_batch and batch_size > 1:
+            # Try batch processing first (fewer API calls)
+            logger.info(f"Using batch LLM classification (batch_size={batch_size})")
+
+            # Convert pending items to batch format
+            email_dicts = [
+                {
+                    "email_id": mid,
+                    "subject": subject,
+                    "body": body,
+                    "sender": sender,
+                    "received_date": received_iso or "",
+                }
+                for idx, mid, subject, sender, body, received_iso in pending
+            ]
+
+            try:
+                confidence_threshold = getattr(settings, "classification_batch_confidence_threshold", 0.6)
+                batch_results = langgraph_process_batch(
+                    email_dicts,
+                    batch_size=batch_size,
+                    confidence_threshold=confidence_threshold,
+                )
+                if batch_results and len(batch_results) == len(pending):
+                    # Store results with original indices
+                    for i, (item, result) in enumerate(zip(pending, batch_results)):
+                        llm_results[item[0]] = (result, None)
+                    logger.info(f"Batch classification complete: {len(batch_results)} emails")
+                else:
+                    # Batch failed, fall back to parallel per-email
+                    logger.warning("Batch classification failed, falling back to parallel per-email")
+                    use_batch = False
+            except Exception as e:
+                logger.warning(f"Batch classification error: {e}, falling back to parallel per-email")
+                use_batch = False
+
+        if not use_batch or not llm_results:
+            # Parallel per-email fallback
+            logger.info(f"Using parallel per-email classification (concurrency={max_concurrency})")
+            with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+                futures = {executor.submit(_run_langgraph, item): item for item in pending}
+                for fut in as_completed(futures):
+                    idx, result, err = fut.result()
+                    llm_results[idx] = (result, err)
 
     # Phase 3: persist cache, duplicate check, create applications (main thread, same DB session)
     processed_so_far = total - len(pending)
@@ -511,7 +687,7 @@ def run_sync_with_options(
         email_class = structured.get("email_class")
         company_name = structured.get("company_name") or "Unknown"
         job_title = structured.get("job_title")
-        if email_class in APPLICATION_LIKE_CLASSES and _is_duplicate_application(db, company_name, job_title, received, user_id):
+        if email_class in APPLICATION_LIKE_CLASSES and duplicate_detector.is_duplicate(company_name, job_title, received):
             logger.info(f"Email {idx+1}/{total}: DUPLICATE (msg_id={mid})")
             skipped += 1
             skipped_duplicate += 1
@@ -519,6 +695,7 @@ def run_sync_with_options(
 
         logger.info(f"Email {idx+1}/{total}: CREATING (msg_id={mid}, class={email_class})")
         _create_application_and_log(db, mid, user_id, structured, subject, sender, body, received, commit=False)
+        duplicate_detector.add_application(company_name, job_title)
         created += 1
         pending_commits += 1
         if pending_commits >= BATCH_COMMIT_SIZE:
