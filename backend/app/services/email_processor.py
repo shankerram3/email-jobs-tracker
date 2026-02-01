@@ -233,6 +233,7 @@ def _create_application_and_log(
         resume_version=structured.get("resume_version"),
         processing_status=structured.get("processing_status") or "completed",
         processed_by=processed_by,
+        needs_review=structured.get("needs_review", False),
     )
     _set_transition_timestamps(app, received, email_class)
     db.add(app)

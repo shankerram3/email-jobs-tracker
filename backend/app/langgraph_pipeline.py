@@ -21,6 +21,75 @@ from .job_title_extraction import get_job_title_candidates, pick_best_job_title,
 
 
 # =============================================================================
+# Classification Guards (Rule-Based Overrides)
+# =============================================================================
+
+def _has_conditional_interview_language(text: str) -> bool:
+    """
+    Detect conditional interview language that should NOT be classified as interview.
+
+    Phrases like "if selected for an interview" are acknowledgments about POTENTIAL
+    future interviews, not actual interview invitations.
+    """
+    conditional_phrases = [
+        r"if\s+(?:you(?:'|')?re|we(?:'|')?re)\s+selected\s+for\s+an?\s+interview",
+        r"if\s+selected\s+for\s+an?\s+interview",
+        r"if\s+we\s+decide\s+to\s+move\s+forward",
+        r"if\s+we\s+move\s+forward",
+        r"should\s+you\s+advance",
+        r"if\s+chosen\s+to\s+move\s+forward",
+        r"if\s+there\s+(?:is|are)\s+(?:a\s+)?(?:potential\s+)?(?:fit|match)",
+        r"we(?:'|')?ll\s+(?:be\s+in\s+touch|reach\s+out|contact\s+you)\s+if",
+    ]
+    return any(re.search(p, text.lower()) for p in conditional_phrases)
+
+
+def _has_rejection_language(text: str) -> bool:
+    """
+    Detect rejection language that should override confirmation classification.
+
+    Even if an email starts with "thank you for your interest", rejection phrases
+    indicate this is a rejection, not a confirmation.
+    """
+    rejection_phrases = [
+        r"unfortunately",
+        r"regret\s+to\s+inform",
+        r"not\s+moving\s+forward",
+        r"will\s+not\s+be\s+moving\s+forward",
+        r"not\s+selected",
+        r"position\s+has\s+been\s+filled",
+        r"decided\s+to\s+(?:move\s+forward\s+with|pursue)\s+other\s+candidates?",
+        r"not\s+(?:quite\s+)?match(?:ing)?\s+(?:the\s+)?requirements?",
+        r"we\s+will\s+not\s+proceed",
+        r"do\s+not\s+align\s+with",
+        r"after\s+careful\s+(?:review|consideration)",
+        r"competitive\s+(?:applicant\s+)?pool",
+        r"won(?:'|')?t\s+be\s+(?:moving|proceeding)",
+        r"not\s+(?:the\s+)?right\s+fit",
+        r"unable\s+to\s+(?:move|proceed)\s+forward",
+    ]
+    return any(re.search(p, text.lower()) for p in rejection_phrases)
+
+
+def _has_actual_interview_invitation(text: str) -> bool:
+    """
+    Detect actual interview invitations (not conditional).
+
+    These are concrete next steps, not conditional possibilities.
+    """
+    interview_phrases = [
+        r"(?:we(?:'|')?d\s+like\s+to|we\s+would\s+like\s+to)\s+(?:invite|schedule)",
+        r"please\s+(?:schedule|book|complete)\s+(?:your|the|an?)\s+(?:interview|assessment)",
+        r"(?:interview|assessment)\s+(?:is\s+)?scheduled\s+for",
+        r"(?:coding|technical)\s+(?:challenge|assessment|test)",
+        r"hackerrank|codesignal|codility|leetcode",
+        r"take[-\s]?home\s+(?:assignment|project|test)",
+        r"next\s+step(?:s)?\s+(?:is|are|in)\s+(?:your|the|our)",
+    ]
+    return any(re.search(p, text.lower()) for p in interview_phrases)
+
+
+# =============================================================================
 # Email Categories (14 total)
 # =============================================================================
 
@@ -41,16 +110,26 @@ EMAIL_CATEGORIES = {
     "receipts_invoices": "Payment receipts and invoices",
 }
 
-# Per-class guidance (key indicators + example snippets) to improve accuracy.
+# Per-class guidance (key indicators + negative indicators + example snippets) to improve accuracy.
 # Keep these compact to avoid prompt bloat.
 CLASS_GUIDANCE = {
     "job_application_confirmation": {
-        "description": "Automated acknowledgment after submitting a job application",
+        "description": "Automated acknowledgment emails received after submitting a job application",
         "key_indicators": [
             "thank you for applying",
             "received your application",
             "application confirmation",
             "we appreciate your interest",
+            "application submitted",
+            "we'll review your application",
+        ],
+        "negative_indicators": [
+            "unfortunately",
+            "not moving forward",
+            "coding challenge",
+            "assessment",
+            "schedule an interview",
+            "invite you to interview",
         ],
         "example": {
             "subject": "Thanks for applying to MyJunior AI!",
@@ -59,12 +138,24 @@ CLASS_GUIDANCE = {
         },
     },
     "job_rejection": {
-        "description": "Rejection notice from a company after review",
+        "description": "Rejection emails from companies after application review, indicating the candidate will not move forward",
         "key_indicators": [
             "thank you for your interest",
+            "not quite match the requirements",
             "not moving forward",
             "do not align with",
             "encourage you to keep an eye",
+            "unfortunately",
+            "after careful consideration",
+            "competitive applicant pool",
+            "decided to pursue other candidates",
+            "position has been filled",
+        ],
+        "negative_indicators": [
+            "next steps",
+            "schedule",
+            "assessment",
+            "interview invitation",
         ],
         "example": {
             "subject": "Thank you for your interest in Respondology",
@@ -73,29 +164,45 @@ CLASS_GUIDANCE = {
         },
     },
     "interview_assessment": {
-        "description": "Invites to interviews, coding assessments, technical tests, or scheduling calls",
+        "description": "Emails inviting candidates to interviews, coding assessments, technical tests, or scheduling interview calls",
         "key_indicators": [
             "next step",
             "invite you to",
             "assessment",
             "coding challenge",
             "technical evaluation",
+            "interview",
             "scheduled for",
+            "HackerRank",
+            "CodeSignal",
+            "Codility",
+            "take-home",
+        ],
+        "negative_indicators": [
+            "if selected for an interview",
+            "if we decide to move forward",
+            "unfortunately",
+            "not moving forward",
         ],
         "example": {
             "subject": "Next Steps with Magic",
             "from": "Magic Hiring Team <no-reply@ashbyhq.com>",
-            "body_snippet": "We would like to invite you to the next step of our selection process. Please watch for an email from CodeSignal with your invitation to complete our 90-minute technical assessment.",
+            "body_snippet": "Thank you for applying for the Software Engineer - Product role at Magic! We would like to invite you to the next step of our selection process. Please watch for an email from CodeSignal with your invitation to complete our 90-minute technical assessment. Block 90 minutes (uninterrupted) where you can focus on completing coding tasks.",
         },
     },
     "application_followup": {
-        "description": "Requests for additional information/documents/actions after applying",
+        "description": "Requests for additional information, documents, or actions after initial application",
         "key_indicators": [
             "additional information needed",
             "next steps for your application",
             "EEO self-identification",
             "complete your profile",
             "work opportunity tax credit",
+        ],
+        "negative_indicators": [
+            "coding challenge",
+            "assessment",
+            "interview",
         ],
         "example": {
             "subject": "EEO Self-Identification Form- Talent Software Services, Inc.",
@@ -104,34 +211,47 @@ CLASS_GUIDANCE = {
         },
     },
     "recruiter_outreach": {
-        "description": "Direct outreach from recruiters/staffing agencies about a role",
+        "description": "Direct outreach from recruiters or staffing agencies about specific job opportunities",
         "key_indicators": [
             "must have",
             "key skills",
             "location:",
             "experience:",
             "are you interested",
+            "staffing",
             "recruiting firm",
+            "came across your profile",
+            "noticed your background",
+        ],
+        "negative_indicators": [
+            "thank you for applying",
+            "received your application",
         ],
         "example": {
             "subject": "Senior Python / Conversational AI Engineer - remote",
             "from": "Rachit Kumar Bhardwaj <rachit.kumar@diverselynx.com>",
-            "body_snippet": "Must have – Python, Conversational AI, NLP, and LLMs. Location: Dallas, TX / Malvern, PA / Remote. Experience: 10+ Years.",
+            "body_snippet": "Senior Python / Conversational AI Engineer / NLP Analyst. Must have – Python, Conversational AI, NLP, and LLMs. Location: Dallas, TX / Malvern, PA / Remote. Experience: 10+ Years. Key Skills: Strong Python development, Experience in Conversational AI, NLP, and LLMs, Hands-on with TensorFlow, PyTorch, Hugging Face.",
         },
     },
     "talent_community": {
-        "description": "Welcome/nurture emails from company talent communities",
+        "description": "Welcome emails and nurture campaigns from company talent communities",
         "key_indicators": [
             "welcome to",
             "talent community",
             "join our community",
             "stay connected",
-            "job alerts",
+            "personalized job",
+            "exclusive",
+        ],
+        "negative_indicators": [
+            "unfortunately",
+            "not moving forward",
+            "not selected",
         ],
         "example": {
             "subject": "You're in! Welcome to the Mastercard talent community",
             "from": "Mastercard <talent@careers.mastercard.com>",
-            "body_snippet": "Welcome to the Mastercard Talent Community. Explore the benefits: Personalized job promos, interview tips, job alerts.",
+            "body_snippet": "Welcome to the Mastercard Talent Community, Ram! By joining our talent community, you're stepping into a world where bold ideas come together. Explore the benefits: Personalized job promos, Ace your interviews with exclusive tips and resources, Enable job alerts.",
         },
     },
     "linkedin_connection_request": {
@@ -142,109 +262,126 @@ CLASS_GUIDANCE = {
             "connections in common",
             "invitations@linkedin.com",
         ],
+        "negative_indicators": [],
         "example": {
             "subject": "I've sent you a connection request",
             "from": "Nitin Pandey <invitations@linkedin.com>",
-            "body_snippet": "I'd like to join your professional network. Waiting for your response.",
+            "body_snippet": "Nitin, Director Talent Acquisition from Emonics LLC is waiting for your response. Hi Ram, I'd like to join your professional network. Nitin Pandey - Full-Time Placement | Managing Fulltime Recruitment Life Cycle. 3 connections in common.",
         },
     },
     "linkedin_message": {
-        "description": "LinkedIn notifications about new messages",
+        "description": "Notifications about new messages received on LinkedIn",
         "key_indicators": [
             "just messaged you",
             "new message",
-            "view message",
             "messaging-digest-noreply@linkedin.com",
+            "view message",
         ],
+        "negative_indicators": [],
         "example": {
             "subject": "Vikram just messaged you",
-            "from": "via LinkedIn <messaging-digest-noreply@linkedin.com>",
-            "body_snippet": "You have 1 new message. View message.",
+            "from": "Vikram Arikath via LinkedIn <messaging-digest-noreply@linkedin.com>",
+            "body_snippet": "You have 1 new message. Vikram Arikath (Senior Business Analyst at The Aspen Group I Data Analysis…). View message: [link]",
         },
     },
     "linkedin_job_recommendations": {
-        "description": "LinkedIn job alert/recommendation emails",
+        "description": "LinkedIn's curated job suggestions and career-related notifications",
         "key_indicators": [
+            "jobs in [location] for you",
             "job alert for",
-            "jobs in",
-            "see all jobs on linkedin",
             "jobalerts-noreply@linkedin.com",
+            "see all jobs on linkedin",
         ],
+        "negative_indicators": [],
         "example": {
-            "subject": "\"Software Engineer\": Matthews - Software Engineer (PHX) and more",
+            "subject": "\"Software Engineer\": Matthews™ - Software Engineer (PHX) and more",
             "from": "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>",
-            "body_snippet": "Your job alert for Software Engineer. New jobs match your preferences.",
+            "body_snippet": "Your job alert for Software Engineer in Phoenix, AZ. New jobs match your preferences.",
         },
     },
     "linkedin_profile_activity": {
-        "description": "LinkedIn profile/post engagement notifications",
+        "description": "LinkedIn notifications about profile views, post engagement, and platform activity",
         "key_indicators": [
             "your posts got",
             "views",
+            "follow",
             "profile activity",
             "notifications-noreply@linkedin.com",
         ],
+        "negative_indicators": [],
         "example": {
-            "subject": "last week your posts got 82 views!",
+            "subject": "Ram, last week your posts got 82 views!",
             "from": "LinkedIn <notifications-noreply@linkedin.com>",
             "body_snippet": "See who viewed your posts and track your engagement.",
         },
     },
     "job_alerts": {
-        "description": "Automated job recommendations from job boards/platforms",
+        "description": "Automated job recommendation emails from job boards and platforms suggesting relevant positions",
         "key_indicators": [
             "job alert",
             "new jobs match your preferences",
+            "jobs in [location] for you",
             "recommended jobs",
             "apply now",
         ],
+        "negative_indicators": [],
         "example": {
             "subject": "\"Software Engineer\": NewtonX - Software Engineer- LLM Systems (Remote) and more",
             "from": "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>",
-            "body_snippet": "Your job alert for Software Engineer. New jobs match your preferences.",
+            "body_snippet": "Your job alert for Software Engineer in United States. New jobs match your preferences. Software Engineer- LLM Systems (Remote) at NewtonX - United States - Fast growing. Software Engineers (Remote) at Keystone Recruitment. Backend Engineer II at Openly.",
         },
     },
     "verification_security": {
-        "description": "OTPs, password resets, verification/security codes",
+        "description": "Security codes, OTPs, password resets, and account verification emails",
         "key_indicators": [
             "verification code",
             "OTP",
             "security code",
-            "expires in",
+            "password setup",
             "verify your account",
+            "expires in",
+            "one-time password",
+            "2FA",
+            "sign-in code",
         ],
+        "negative_indicators": [],
         "example": {
             "subject": "Here's your verification code from ADP",
             "from": "SecurityServices_NoReply@adp.com",
-            "body_snippet": "Verification code: 356103. This code expires in 15 minutes.",
+            "body_snippet": "Verification code: 356103. This code expires in 15 minutes. Enter this code to access ADP services.",
         },
     },
     "promotional_marketing": {
-        "description": "Marketing emails, feature announcements, career tips",
+        "description": "Marketing emails, feature announcements, and promotional content from job platforms",
         "key_indicators": [
             "new feature",
             "tips",
             "career advice",
+            "learning spotlight",
+            "check out",
             "discover",
         ],
+        "negative_indicators": [],
         "example": {
-            "subject": "craft a resume that rises above the noise",
+            "subject": "Ram, craft a resume that rises above the noise",
             "from": "LinkedIn <editors-noreply@linkedin.com>",
             "body_snippet": "Tips and tools to improve your resume and stand out to recruiters.",
         },
     },
     "receipts_invoices": {
-        "description": "Payment receipts, invoices, transaction confirmations",
+        "description": "Payment receipts, invoices, and financial transaction confirmations",
         "key_indicators": [
             "receipt",
             "invoice",
             "payment",
             "order confirmation",
+            "@stripe.com",
             "total amount",
         ],
+        "negative_indicators": [],
         "example": {
             "subject": "Your receipt from Wynisco #2026-0074",
-            "from": "Wynisco <invoice+statements@stripe.com>",
+            "from": "Wynisco <invoice+statements+acct_1HeMfYFqP09V28F5@stripe.com>",
             "body_snippet": "Receipt for your recent payment.",
         },
     },
@@ -260,6 +397,7 @@ def _truncate(text: str, max_len: int) -> str:
 
 def _build_guidance_text(
     max_indicators: int = 6,
+    max_neg_indicators: int = 3,
     max_snippet_len: int = 220,
 ) -> str:
     """Compact few-shot guidance to help the classifier separate similar classes."""
@@ -271,10 +409,15 @@ def _build_guidance_text(
         indicators = g.get("key_indicators") or []
         indicators = [str(x) for x in indicators if x]
         indicators = indicators[:max_indicators]
+        neg_indicators = g.get("negative_indicators") or []
+        neg_indicators = [str(x) for x in neg_indicators if x]
+        neg_indicators = neg_indicators[:max_neg_indicators]
         ex = g.get("example") or {}
         lines.append(f"- {class_name}: {g.get('description','')}".strip())
         if indicators:
-            lines.append(f"  indicators: {', '.join(indicators)}")
+            lines.append(f"  LOOK FOR: {', '.join(indicators)}")
+        if neg_indicators:
+            lines.append(f"  NOT IF: {', '.join(neg_indicators)}")
         subj = _truncate(str(ex.get('subject') or ''), 120)
         frm = _truncate(str(ex.get('from') or ''), 120)
         snippet = _truncate(str(ex.get('body_snippet') or ''), max_snippet_len)
@@ -327,6 +470,7 @@ class EmailState(TypedDict, total=False):
     email_class: str
     confidence: float
     classification_reasoning: str
+    needs_review: bool  # Flag for low-confidence classifications
 
     # Extracted entities
     company_name: Optional[str]
@@ -412,7 +556,11 @@ def _parse_json_response(text: str) -> dict:
 def classify_email_node(state: EmailState) -> dict:
     """
     Classify email into one of 14 categories using GPT-4o-mini.
-    Returns classification, confidence, and reasoning.
+    Returns classification, confidence, reasoning, and needs_review flag.
+
+    Applies rule-based guards to correct common misclassifications:
+    - Conditional interview language -> job_application_confirmation
+    - Rejection language in confirmations -> job_rejection
     """
     categories_text = "\n".join(
         f"{i+1}. {name} - {desc}"
@@ -429,11 +577,33 @@ Classify this email into EXACTLY ONE of these 14 classes:
 GUIDANCE (use as examples and cues):
 {guidance_text}
 
+CRITICAL DISAMBIGUATION RULES:
+1. CONDITIONAL LANGUAGE = job_application_confirmation (NOT interview_assessment)
+   - "if selected for an interview" = NOT an interview invite
+   - "if we decide to move forward" = NOT an interview invite
+   - "we'll be in touch if there's a fit" = NOT an interview invite
+   - These are acknowledgments with conditional future possibilities
+
+2. REJECTION LANGUAGE = job_rejection (even with polite phrases)
+   - "unfortunately" = REJECTION
+   - "not moving forward" = REJECTION
+   - "position has been filled" = REJECTION
+   - "decided to pursue other candidates" = REJECTION
+   - "thank you for your interest" + any rejection phrase = REJECTION
+
+3. ACTUAL INTERVIEW = interview_assessment
+   - "we'd like to schedule an interview" = interview
+   - "please complete this assessment" = interview_assessment
+   - "your interview is scheduled for" = interview_assessment
+   - Must have CONCRETE next step, not conditional
+
 PRIORITY RULES (when multiple classes could apply):
-- interview_assessment > job_application_confirmation (if mentions next steps/assessment)
+- job_rejection > job_application_confirmation (if ANY rejection language present)
 - job_rejection > talent_community (if clearly rejecting)
+- interview_assessment > job_application_confirmation (ONLY if concrete interview/assessment, not conditional)
 - verification_security > application_followup (if contains OTP/code)
 - recruiter_outreach > job_alerts (if from a specific recruiter person)
+- application_followup > job_application_confirmation (if requests documents/forms)
 
 EMAIL TO CLASSIFY:
 Subject: {state.get('subject', '')}
@@ -447,19 +617,48 @@ Return ONLY valid JSON (no markdown):
   "reasoning": "<brief 1-sentence explanation>"
 }}"""
 
+    subject = state.get('subject', '') or ''
+    body = state.get('body', '') or ''
+    combined_text = f"{subject}\n{body}".lower()
+
     try:
         response_text = _call_llm(prompt, max_tokens=220, force_json=True)
         result = _parse_json_response(response_text)
 
         email_class = (result.get("email_class") or "").strip()
+        confidence = float(result.get("confidence", 0.5))
+        reasoning = result.get("reasoning", "")
+
         # Validate category
         if email_class not in EMAIL_CATEGORIES:
             email_class = "promotional_marketing"  # Default fallback
 
+        # =================================================================
+        # Apply rule-based guards to correct common misclassifications
+        # =================================================================
+
+        # Guard 1: Rejection language should override confirmation/talent_community
+        if email_class in ("job_application_confirmation", "talent_community"):
+            if _has_rejection_language(combined_text):
+                email_class = "job_rejection"
+                reasoning = f"[Override: rejection language detected] {reasoning}"
+
+        # Guard 2: Conditional interview language should NOT be interview_assessment
+        if email_class == "interview_assessment":
+            if _has_conditional_interview_language(combined_text):
+                # Only override if there's NO actual interview invitation
+                if not _has_actual_interview_invitation(combined_text):
+                    email_class = "job_application_confirmation"
+                    reasoning = f"[Override: conditional language, no concrete invite] {reasoning}"
+
+        # Calculate needs_review flag for low-confidence classifications
+        needs_review = confidence < 0.65
+
         return {
             "email_class": email_class,
-            "confidence": float(result.get("confidence", 0.5)),
-            "classification_reasoning": result.get("reasoning", ""),
+            "confidence": confidence,
+            "classification_reasoning": reasoning,
+            "needs_review": needs_review,
             "errors": state.get("errors", []),
         }
     except Exception as e:
@@ -467,6 +666,7 @@ Return ONLY valid JSON (no markdown):
             "email_class": "promotional_marketing",
             "confidence": 0.0,
             "classification_reasoning": f"Classification failed: {str(e)}",
+            "needs_review": True,  # Flag failed classifications for review
             "errors": state.get("errors", []) + [f"classify_error: {str(e)}"],
         }
 

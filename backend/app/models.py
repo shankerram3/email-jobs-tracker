@@ -76,6 +76,9 @@ class Application(Base):
     processing_status = Column(String, default="pending")  # pending, completed, failed
     processed_by = Column(String, nullable=True)  # Model version that processed this
 
+    # Review flagging
+    needs_review = Column(Boolean, default=False, nullable=True)  # Flag for low-confidence classifications
+
 
 class EmailLog(Base):
     __tablename__ = "email_logs"

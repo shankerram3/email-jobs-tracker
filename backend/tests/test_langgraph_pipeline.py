@@ -1,5 +1,224 @@
 import json
+import pytest
 
+
+# =============================================================================
+# Tests for Classification Guards
+# =============================================================================
+
+def test_has_conditional_interview_language():
+    """Test that conditional interview language is correctly detected."""
+    from app.langgraph_pipeline import _has_conditional_interview_language
+
+    # Should detect conditional language
+    assert _has_conditional_interview_language("If selected for an interview, we will contact you.")
+    assert _has_conditional_interview_language("if we decide to move forward, a recruiter will reach out")
+    assert _has_conditional_interview_language("Should you advance to the next step, we'll be in touch.")
+    assert _has_conditional_interview_language("We'll reach out if there's a fit.")
+    assert _has_conditional_interview_language("If you're selected for an interview")
+
+    # Should NOT detect conditional language
+    assert not _has_conditional_interview_language("We'd like to schedule an interview with you.")
+    assert not _has_conditional_interview_language("Your interview is scheduled for Monday.")
+    assert not _has_conditional_interview_language("Please complete the coding assessment.")
+
+
+def test_has_rejection_language():
+    """Test that rejection language is correctly detected."""
+    from app.langgraph_pipeline import _has_rejection_language
+
+    # Should detect rejection language
+    assert _has_rejection_language("Unfortunately, we have decided not to move forward.")
+    assert _has_rejection_language("We regret to inform you that the position has been filled.")
+    assert _has_rejection_language("Your skills do not quite match the requirements.")
+    assert _has_rejection_language("We have decided to pursue other candidates.")
+    assert _has_rejection_language("After careful consideration, we will not proceed.")
+    assert _has_rejection_language("Your skills do not align with what we're looking for.")
+
+    # Should NOT detect rejection language
+    assert not _has_rejection_language("Thank you for applying! We'll review your application.")
+    assert not _has_rejection_language("We'd like to schedule an interview.")
+    assert not _has_rejection_language("Please complete this assessment.")
+
+
+def test_has_actual_interview_invitation():
+    """Test that actual interview invitations are correctly detected."""
+    from app.langgraph_pipeline import _has_actual_interview_invitation
+
+    # Should detect actual interview invitations
+    assert _has_actual_interview_invitation("We'd like to invite you to an interview.")
+    assert _has_actual_interview_invitation("Please schedule your interview using the link below.")
+    assert _has_actual_interview_invitation("Your interview is scheduled for Monday at 2pm.")
+    assert _has_actual_interview_invitation("Please complete the HackerRank assessment.")
+    assert _has_actual_interview_invitation("We'd like you to complete a take-home assignment.")
+
+    # Should NOT detect actual interview invitations
+    assert not _has_actual_interview_invitation("Thank you for applying.")
+    assert not _has_actual_interview_invitation("We received your application.")
+    assert not _has_actual_interview_invitation("If selected for an interview, we'll contact you.")
+
+
+def test_conditional_language_override(monkeypatch):
+    """Test that conditional language overrides interview_assessment to job_application_confirmation."""
+    from app import langgraph_pipeline as lp
+
+    def fake_call_llm(prompt: str, max_tokens: int = 500, force_json: bool = False) -> str:
+        # LLM incorrectly classifies as interview_assessment
+        if "Extract structured information" in prompt:
+            return json.dumps(
+                {"company_name": "TestCo", "job_title": "Engineer", "position_level": "Senior"}
+            )
+        return json.dumps(
+            {
+                "email_class": "interview_assessment",
+                "confidence": 0.75,
+                "reasoning": "Contains next steps language.",
+            }
+        )
+
+    monkeypatch.setattr(lp, "_call_llm", fake_call_llm)
+
+    # Email with conditional language should be overridden to job_application_confirmation
+    result = lp.process_email(
+        email_id="test_conditional",
+        subject="Thank you for applying to TestCo",
+        body="Thank you for your interest. If selected for an interview, a recruiter will reach out within two weeks.",
+        sender="no-reply@testco.com",
+        received_date="2026-01-30",
+    )
+
+    assert result["email_class"] == "job_application_confirmation"
+    assert "[Override: conditional language" in result["classification_reasoning"]
+
+
+def test_rejection_language_override(monkeypatch):
+    """Test that rejection language overrides job_application_confirmation to job_rejection."""
+    from app import langgraph_pipeline as lp
+
+    def fake_call_llm(prompt: str, max_tokens: int = 500, force_json: bool = False) -> str:
+        # LLM incorrectly classifies as job_application_confirmation
+        if "Extract structured information" in prompt:
+            return json.dumps(
+                {"company_name": "RejectionCo", "job_title": "Developer", "position_level": "Mid"}
+            )
+        return json.dumps(
+            {
+                "email_class": "job_application_confirmation",
+                "confidence": 0.65,
+                "reasoning": "Contains thank you language.",
+            }
+        )
+
+    monkeypatch.setattr(lp, "_call_llm", fake_call_llm)
+
+    # Email with rejection language should be overridden to job_rejection
+    result = lp.process_email(
+        email_id="test_rejection",
+        subject="Thank you for your interest in RejectionCo",
+        body="Thank you for your interest. Unfortunately, we have decided not to move forward with your application.",
+        sender="hr@rejectionco.com",
+        received_date="2026-01-30",
+    )
+
+    assert result["email_class"] == "job_rejection"
+    assert "[Override: rejection language detected]" in result["classification_reasoning"]
+
+
+def test_actual_interview_not_overridden(monkeypatch):
+    """Test that actual interview invitations are NOT overridden even with some conditional language."""
+    from app import langgraph_pipeline as lp
+
+    def fake_call_llm(prompt: str, max_tokens: int = 500, force_json: bool = False) -> str:
+        if "Extract structured information" in prompt:
+            return json.dumps(
+                {"company_name": "InterviewCo", "job_title": "Engineer", "position_level": "Senior"}
+            )
+        return json.dumps(
+            {
+                "email_class": "interview_assessment",
+                "confidence": 0.85,
+                "reasoning": "Contains interview scheduling.",
+            }
+        )
+
+    monkeypatch.setattr(lp, "_call_llm", fake_call_llm)
+
+    # Email with actual interview invitation should NOT be overridden
+    result = lp.process_email(
+        email_id="test_actual_interview",
+        subject="Next Steps - Interview at InterviewCo",
+        body="We'd like to schedule an interview with you. Please complete the HackerRank assessment first.",
+        sender="recruiting@interviewco.com",
+        received_date="2026-01-30",
+    )
+
+    assert result["email_class"] == "interview_assessment"
+    assert "[Override" not in result["classification_reasoning"]
+
+
+def test_needs_review_flag_low_confidence(monkeypatch):
+    """Test that low confidence classifications are flagged for review."""
+    from app import langgraph_pipeline as lp
+
+    def fake_call_llm(prompt: str, max_tokens: int = 500, force_json: bool = False) -> str:
+        if "Extract structured information" in prompt:
+            return json.dumps(
+                {"company_name": "LowConfCo", "job_title": "Engineer", "position_level": "Mid"}
+            )
+        return json.dumps(
+            {
+                "email_class": "promotional_marketing",
+                "confidence": 0.45,  # Low confidence
+                "reasoning": "Uncertain classification.",
+            }
+        )
+
+    monkeypatch.setattr(lp, "_call_llm", fake_call_llm)
+
+    result = lp.process_email(
+        email_id="test_low_confidence",
+        subject="Some unclear email",
+        body="This email content is ambiguous.",
+        sender="unknown@example.com",
+        received_date="2026-01-30",
+    )
+
+    assert result["needs_review"] is True
+
+
+def test_needs_review_flag_high_confidence(monkeypatch):
+    """Test that high confidence classifications are NOT flagged for review."""
+    from app import langgraph_pipeline as lp
+
+    def fake_call_llm(prompt: str, max_tokens: int = 500, force_json: bool = False) -> str:
+        if "Extract structured information" in prompt:
+            return json.dumps(
+                {"company_name": "HighConfCo", "job_title": "Engineer", "position_level": "Senior"}
+            )
+        return json.dumps(
+            {
+                "email_class": "job_application_confirmation",
+                "confidence": 0.92,  # High confidence
+                "reasoning": "Clear application confirmation.",
+            }
+        )
+
+    monkeypatch.setattr(lp, "_call_llm", fake_call_llm)
+
+    result = lp.process_email(
+        email_id="test_high_confidence",
+        subject="Thank you for applying to HighConfCo",
+        body="Thank you for applying. We have received your application.",
+        sender="no-reply@highconfco.com",
+        received_date="2026-01-30",
+    )
+
+    assert result["needs_review"] is False
+
+
+# =============================================================================
+# Original Tests
+# =============================================================================
 
 def test_langgraph_process_email_basic(monkeypatch):
     """
