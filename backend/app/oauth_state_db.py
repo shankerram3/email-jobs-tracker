@@ -11,7 +11,12 @@ KIND_GMAIL = "gmail"
 KIND_GOOGLE_LOGIN = "google_login"
 
 
-def oauth_state_set(kind: str, state_token: str, redirect_url: Optional[str] = None) -> None:
+def oauth_state_set(
+    kind: str,
+    state_token: str,
+    redirect_url: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> None:
     """Store OAuth state token. Overwrites if exists."""
     db = SessionLocal()
     try:
@@ -19,12 +24,14 @@ def oauth_state_set(kind: str, state_token: str, redirect_url: Optional[str] = N
         row = db.query(OAuthState).filter(OAuthState.state_token == state_token).first()
         if row:
             row.kind = kind
+            row.user_id = user_id
             row.redirect_url = redirect_url
             row.created_at = now
         else:
             db.add(OAuthState(
                 state_token=state_token,
                 kind=kind,
+                user_id=user_id,
                 redirect_url=redirect_url or "",
                 created_at=now,
             ))
@@ -36,7 +43,8 @@ def oauth_state_set(kind: str, state_token: str, redirect_url: Optional[str] = N
 def oauth_state_consume(state_token: str) -> Optional[dict]:
     """
     Look up state, validate TTL, delete row, return payload or None.
-    Returns {"redirect_url": str, "created_at": datetime} if valid; None if missing or expired.
+    Returns {"redirect_url": str, "created_at": datetime, "user_id": Optional[int], "kind": str} if valid;
+    None if missing or expired.
     """
     db = SessionLocal()
     try:
@@ -47,7 +55,12 @@ def oauth_state_consume(state_token: str) -> Optional[dict]:
             db.delete(row)
             db.commit()
             return None
-        payload = {"redirect_url": row.redirect_url or "", "created_at": row.created_at}
+        payload = {
+            "redirect_url": row.redirect_url or "",
+            "created_at": row.created_at,
+            "user_id": row.user_id,
+            "kind": row.kind,
+        }
         db.delete(row)
         db.commit()
         return payload

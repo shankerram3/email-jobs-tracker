@@ -36,14 +36,37 @@ def _resolve_path(path: str) -> str:
     return os.path.join(backend_dir, path)
 
 
+def _token_path_for_user(user_id: Optional[int]) -> str:
+    """
+    Resolve Gmail token path for a given user.
+
+    - If TOKEN_DIR is set and user_id is provided, store tokens at:
+      TOKEN_DIR/token_<user_id>.pickle
+    - Otherwise, fall back to legacy TOKEN_PATH (single shared token file).
+    """
+    token_dir = getattr(settings, "token_dir", None)
+    if token_dir and user_id is None:
+        raise ValueError("TOKEN_DIR is set; user_id is required for Gmail token access")
+    if user_id is not None and token_dir:
+        resolved_dir = _resolve_path(token_dir)
+        return os.path.join(resolved_dir, f"token_{user_id}.pickle")
+    return _resolve_path(settings.token_path)
+
+
+def _ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 class GmailAuthRequiredError(Exception):
     """Raised when Gmail needs interactive OAuth (browser). Do not run in background task."""
     pass
 
 
-def _gmail_creds_ready_for_background() -> bool:
+def _gmail_creds_ready_for_background(user_id: Optional[int]) -> bool:
     """True if we can get a service without blocking on browser OAuth."""
-    token_path = _resolve_path(settings.token_path)
+    token_path = _token_path_for_user(user_id)
     creds_path = _resolve_path(settings.credentials_path)
     if not os.path.exists(creds_path):
         return False
@@ -67,7 +90,7 @@ def _gmail_creds_ready_for_background() -> bool:
     return False
 
 
-def start_gmail_oauth(redirect_url_after: str) -> str:
+def start_gmail_oauth(redirect_url_after: str, user_id: int) -> str:
     """
     Start OAuth with CSRF state. Use when gmail_oauth_redirect_uri is set.
     Returns the Google authorization URL to redirect the user to.
@@ -83,7 +106,7 @@ def start_gmail_oauth(redirect_url_after: str) -> str:
     if not redirect_uri:
         raise ValueError("GMAIL_OAUTH_REDIRECT_URI must be set to use start_gmail_oauth")
     state = secrets.token_urlsafe(32)
-    oauth_state_set(KIND_GMAIL, state, redirect_url_after)
+    oauth_state_set(KIND_GMAIL, state, redirect_url_after, user_id=user_id)
     flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES, redirect_uri=redirect_uri)
     auth_url, _ = flow.authorization_url(prompt="consent", state=state, access_type="offline")
     return auth_url
@@ -97,10 +120,17 @@ def finish_gmail_oauth(code: str, state: str) -> str:
     entry = oauth_state_consume(state)
     if not entry:
         raise ValueError("Invalid or expired OAuth state")
+    if entry.get("kind") != KIND_GMAIL:
+        raise ValueError("Invalid or expired OAuth state")
     # Always prefer stored redirect_url; fall back to configured CORS origin (prod-safe) then localhost.
     redirect_url = entry.get("redirect_url") or (settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173")
     creds_path = _resolve_path(settings.credentials_path)
-    token_path = _resolve_path(settings.token_path)
+    user_id = entry.get("user_id")
+    if getattr(settings, "token_dir", None) and user_id is None:
+        # Enforce user binding when TOKEN_DIR is enabled (multi-user safe default).
+        raise ValueError("Invalid OAuth state (missing user binding)")
+    token_path = _token_path_for_user(user_id) if user_id is not None else _resolve_path(settings.token_path)
+    _ensure_parent_dir(token_path)
     flow = InstalledAppFlow.from_client_secrets_file(
         creds_path, SCOPES, redirect_uri=settings.gmail_oauth_redirect_uri
     )
@@ -115,14 +145,16 @@ def finish_gmail_oauth(code: str, state: str) -> str:
     return redirect_url
 
 
-def get_gmail_service(allow_interactive_oauth: bool = False):
+def get_gmail_service(user_id: Optional[int] = None, allow_interactive_oauth: bool = False):
     """
     Return Gmail API service. If allow_interactive_oauth is False (default) and
     we would need to open a browser (run_local_server), raises GmailAuthRequiredError
     so the caller can show a message instead of blocking forever in a background task.
     """
+    if getattr(settings, "token_dir", None) and user_id is None:
+        raise ValueError("TOKEN_DIR is set; user_id is required for Gmail token access")
     creds = None
-    token_path = _resolve_path(settings.token_path)
+    token_path = _token_path_for_user(user_id)
     creds_path = _resolve_path(settings.credentials_path)
 
     if os.path.exists(token_path):
@@ -151,6 +183,7 @@ def get_gmail_service(allow_interactive_oauth: bool = False):
                 )
             flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
             creds = flow.run_local_server(port=0)
+        _ensure_parent_dir(token_path)
         with open(token_path, "wb") as token:
             pickle.dump(creds, token)
         try:

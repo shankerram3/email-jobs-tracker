@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 from sse_starlette.sse import EventSourceResponse
 import asyncio
 import json
+import urllib.parse
 
 from ..database import SessionLocal, get_sync_db
 from ..services.email_processor import run_sync_with_options
@@ -34,6 +35,36 @@ router = APIRouter(prefix="/api", tags=["sync"])
 def _origin_from_request(request: Request) -> str:
     # request.base_url includes trailing slash
     return str(request.base_url).rstrip("/")
+
+def _sanitize_redirect_url(request: Request, redirect_url: Optional[str]) -> Optional[str]:
+    """
+    Prevent open redirects: allow only same-origin or configured CORS origins.
+
+    - Accept absolute http(s) URLs whose origin matches request origin or a CORS origin.
+    - Accept relative paths (starting with '/') and resolve them against request origin.
+    - Otherwise return None.
+    """
+    if not redirect_url:
+        return None
+    origin = _origin_from_request(request)
+    if redirect_url.startswith("/"):
+        return origin + redirect_url
+    try:
+        parsed = urllib.parse.urlparse(redirect_url)
+    except Exception:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    redirect_origin = f"{parsed.scheme}://{parsed.netloc}"
+    allowed_origins = {origin}
+    for o in (settings.cors_origins or []):
+        try:
+            po = urllib.parse.urlparse(o)
+            if po.scheme in ("http", "https") and po.netloc:
+                allowed_origins.add(f"{po.scheme}://{po.netloc}")
+        except Exception:
+            continue
+    return redirect_url if redirect_origin in allowed_origins else None
 
 
 def _run_sync_task(mode: str, user_id: int, after_date: Optional[str] = None, before_date: Optional[str] = None):
@@ -69,18 +100,22 @@ def _run_sync_task(mode: str, user_id: int, after_date: Optional[str] = None, be
 
 
 @router.get("/gmail/auth")
-def gmail_auth(request: Request, redirect_url: Optional[str] = None):
+def gmail_auth(
+    request: Request,
+    redirect_url: Optional[str] = None,
+    current_user: User = Depends(get_current_user_for_sse),
+):
     """
     Complete Gmail OAuth in the browser. Open this URL in your browser to sign in;
     after that, Sync will work without blocking. Optional: ?redirect_url=https://<your-domain>
     When GMAIL_OAUTH_REDIRECT_URI is set, uses CSRF state; add GET /api/gmail/callback as redirect URI in Google Cloud.
     """
-    redirect_after = redirect_url or _origin_from_request(request)
+    redirect_after = _sanitize_redirect_url(request, redirect_url) or _origin_from_request(request)
     try:
         if settings.gmail_oauth_redirect_uri:
-            auth_url = start_gmail_oauth(redirect_url_after=redirect_after)
+            auth_url = start_gmail_oauth(redirect_url_after=redirect_after, user_id=current_user.id)
             return RedirectResponse(url=auth_url, status_code=302)
-        get_gmail_service(allow_interactive_oauth=True)
+        get_gmail_service(user_id=current_user.id, allow_interactive_oauth=True)
     except FileNotFoundError as e:
         return {"error": str(e), "hint": "Add credentials.json from Google Cloud Console to the backend folder."}
     except ValueError as e:
@@ -113,7 +148,7 @@ async def sync_emails(
     """Start email sync. mode=auto|incremental|full. Optional after_date/before_date (YYYY-MM-DD or YYYY/MM/DD) for full sync date range. Poll GET /api/sync-status or GET /api/sync-events for progress."""
     if mode not in ("auto", "incremental", "full"):
         mode = "auto"
-    if not _gmail_creds_ready_for_background():
+    if not _gmail_creds_ready_for_background(current_user.id):
         from fastapi import HTTPException
         raise HTTPException(
             status_code=400,

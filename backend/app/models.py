@@ -148,6 +148,8 @@ class OAuthState(Base):
 
     state_token = Column(String(64), primary_key=True)
     kind = Column(String(32), nullable=False, index=True)  # gmail, google_login
+    # For flows initiated by an authenticated user (e.g. Gmail OAuth), bind state → user.
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     redirect_url = Column(String(512), nullable=True)
     created_at = Column(DateTime, nullable=False)
 

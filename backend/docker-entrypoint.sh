@@ -22,6 +22,12 @@ if [ ! -w /data ]; then
   echo "[entrypoint] WARNING: /data is not writable; falling back to /tmp (OAuth token will not persist across restarts)."
   : "${CREDENTIALS_PATH:=/tmp/credentials.json}"
   : "${TOKEN_PATH:=/tmp/token.pickle}"
+  : "${TOKEN_DIR:=/tmp/gmail_tokens}"
+fi
+
+# Ensure TOKEN_DIR exists if set (best-effort).
+if [ "${TOKEN_DIR:-}" != "" ]; then
+  mkdir -p "$TOKEN_DIR" 2>/dev/null || true
 fi
 
 # Optional: allow providing Gmail OAuth client JSON via env var (useful on PaaS).

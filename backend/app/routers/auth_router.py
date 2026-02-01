@@ -72,6 +72,37 @@ def _default_frontend_origin(request: Request) -> str:
     return settings.cors_origins[0] if settings.cors_origins else "http://localhost:5173"
 
 
+def _sanitize_redirect_url(request: Request, redirect_url: Optional[str]) -> Optional[str]:
+    """
+    Prevent open redirects: allow only same-origin or configured CORS origins.
+
+    - Accept absolute http(s) URLs whose origin matches request origin or a CORS origin.
+    - Accept relative paths (starting with '/') and resolve them against request origin.
+    - Otherwise return None.
+    """
+    if not redirect_url:
+        return None
+    origin = _origin_from_request(request)
+    if redirect_url.startswith("/"):
+        return origin + redirect_url
+    try:
+        parsed = urllib.parse.urlparse(redirect_url)
+    except Exception:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    redirect_origin = f"{parsed.scheme}://{parsed.netloc}"
+    allowed_origins = {origin}
+    for o in (settings.cors_origins or []):
+        try:
+            po = urllib.parse.urlparse(o)
+            if po.scheme in ("http", "https") and po.netloc:
+                allowed_origins.add(f"{po.scheme}://{po.netloc}")
+        except Exception:
+            continue
+    return redirect_url if redirect_origin in allowed_origins else None
+
+
 def _google_redirect_uri(request: Request) -> str:
     """
     Redirect URI used for Google OAuth callback.
@@ -144,7 +175,7 @@ def google_auth_start(request: Request, redirect_url: Optional[str] = None):
             detail="GOOGLE_CLIENT_ID not set. Add it to .env for Sign in with Google.",
         )
     redirect_uri = _google_redirect_uri(request)
-    after_login = redirect_url or _default_frontend_origin(request)
+    after_login = _sanitize_redirect_url(request, redirect_url) or _default_frontend_origin(request)
     state = secrets.token_urlsafe(32)
     oauth_state_set(KIND_GOOGLE_LOGIN, state, after_login)
     params = {
@@ -178,6 +209,9 @@ async def google_auth_callback(
         return RedirectResponse(url=f"{frontend_origin}/login?error=missing_state", status_code=302)
     entry = oauth_state_consume(state)
     if not entry:
+        frontend_origin = _default_frontend_origin(request)
+        return RedirectResponse(url=f"{frontend_origin}/login?error=invalid_state", status_code=302)
+    if entry.get("kind") != KIND_GOOGLE_LOGIN:
         frontend_origin = _default_frontend_origin(request)
         return RedirectResponse(url=f"{frontend_origin}/login?error=invalid_state", status_code=302)
     if not code or not settings.google_client_id or not settings.google_client_secret:

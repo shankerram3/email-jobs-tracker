@@ -51,7 +51,7 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 
 ### Data flow
 
-1. **Auth:** User opens `/api/gmail/auth` in browser → OAuth flow → token stored (e.g. `token.pickle`). Backend checks credentials are “ready for background” before starting sync.
+1. **Auth:** Authenticated user opens `/api/gmail/auth` (or `/api/gmail/auth?token=<JWT>` in a browser) → OAuth flow → token stored per-user (recommended: `TOKEN_DIR/token_<user_id>.pickle`). Backend checks credentials are “ready for background” before starting sync.
 2. **Sync start:** `POST /api/sync-emails?mode=auto|full|incremental` → background task starts.
 3. **Sync execution:**  
    - **Auto:** If no historyId or no applications yet → full sync; else incremental (history).  
@@ -198,7 +198,8 @@ Notes:
 | `SQLITE_BUSY_TIMEOUT_MS` | `5000` | Busy timeout for SQLite concurrency. |
 | **Gmail OAuth (sync)** | | |
 | `CREDENTIALS_PATH` | `credentials.json` | Path to Google OAuth client JSON (relative to `backend/` or absolute). |
-| `TOKEN_PATH` | `token.pickle` | Path to store Gmail OAuth token (file is written with `0o600`). |
+| `TOKEN_DIR` | (none) | **Recommended (multi-user):** directory to store per-user Gmail OAuth tokens as `token_<user_id>.pickle` (relative to `backend/` or absolute). When set, Gmail tokens are **user-isolated**. |
+| `TOKEN_PATH` | `token.pickle` | **Legacy (single-user only):** path to store a single Gmail OAuth token (file is written with `0o600`). If `TOKEN_DIR` is set, this is ignored for Gmail sync. |
 | `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, `/api/gmail/auth` uses a redirect-based OAuth flow with CSRF `state` and callback at `/api/gmail/callback` (e.g. `https://<your-domain>/api/gmail/callback`). Add this exact URI to your Google OAuth client’s redirect URIs. |
 | `GMAIL_CREDENTIALS_JSON` | (none) | **(Railway/containers)** Paste the full contents of `credentials.json` here; the container entrypoint writes it to `CREDENTIALS_PATH` at startup. |
 | **AI** | | |
@@ -275,7 +276,7 @@ npm run dev
 
 Then:
 
-- Open **`GET /api/gmail/auth`** once in your browser to grant Gmail access
+- Get a JWT (`POST /api/login`) and open **`GET /api/gmail/auth?token=<JWT>`** once in your browser to grant Gmail access
 - Use the UI to trigger sync, or call `POST /api/sync-emails`
 
 ---
@@ -297,6 +298,9 @@ docker compose up --build
 Open the app at `http://localhost:5173`.
 
 **Gmail OAuth in Docker**: the compose config sets `GMAIL_OAUTH_REDIRECT_URI` to `http://localhost:8000/api/gmail/callback`. Add that redirect URI to your Google Cloud OAuth client, then open `http://localhost:8000/api/gmail/auth?redirect_url=http://localhost:5173`.
+
+Note: `/api/gmail/auth` requires auth; in a browser use `?token=<JWT>`:
+`http://localhost:8000/api/gmail/auth?token=<JWT>&redirect_url=http://localhost:5173`
 
 ---
 
@@ -405,7 +409,7 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 
 | Method | Path | Query / Body | Description |
 |--------|------|--------------|-------------|
-| GET | `/api/gmail/auth` | Optional: `redirect_url` | Redirects to Gmail OAuth; after consent, redirects to `redirect_url` (or current request origin). When `GMAIL_OAUTH_REDIRECT_URI` is set, uses CSRF state. |
+| GET | `/api/gmail/auth` | Optional: `redirect_url` | Redirects to Gmail OAuth; after consent, redirects to `redirect_url` (or current request origin). **Redirects are restricted** to same-origin or `CORS_ORIGINS`. When `GMAIL_OAUTH_REDIRECT_URI` is set, uses CSRF state. |
 | GET | `/api/gmail/callback` | `code`, `state` (from Google) | OAuth callback when `GMAIL_OAUTH_REDIRECT_URI` is set; validates state and exchanges code for token. |
 | POST | `/api/sync-emails` | Query: `mode=auto\|incremental\|full` | Start sync in background; returns immediately. |
 | GET | `/api/sync-status` | — | Current sync progress for this user: status, message, processed, total, created, skipped, errors, error. |
@@ -470,7 +474,7 @@ pytest
 - **Frontend dev proxy**: Vite proxies `/api` to `http://127.0.0.1:8000` (IPv4) to avoid macOS IPv6 `localhost -> ::1` connection issues.
 - **Production DB**: use Postgres (`DATABASE_URL`). If you connect to Supabase/managed Postgres with strict SSL verification, set `SUPABASE_SSL_CA_FILE` and keep `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` modest.
 - **Workers**: `/api/reprocess/*` requires Celery + Redis. `/api/sync-emails` currently runs in-process (FastAPI background task); if you need “sync survives API restarts”, wire sync into Celery similarly.
-- **Secrets**: prefer a secrets manager in production; keep `.env`, `credentials.json`, and `token.pickle` out of containers/images and out of git.
+- **Secrets**: prefer a secrets manager in production; keep `.env`, `credentials.json`, and Gmail token files (e.g. `TOKEN_DIR/token_<user_id>.pickle`) out of containers/images and out of git.
 
 ---
 
@@ -479,7 +483,7 @@ pytest
 - **Redis**: create a Railway Redis service and set `REDIS_URL` to its connection URL (**not** `redis://localhost:6379/0`).
 - **Persistent token storage**: add a Railway Volume mounted at `/data` and set:
   - `CREDENTIALS_PATH=/data/credentials.json`
-  - `TOKEN_PATH=/data/token.pickle`
+  - `TOKEN_DIR=/data/gmail_tokens`
   - `GMAIL_CREDENTIALS_JSON=<paste credentials.json contents>`
 - **OAuth redirect URIs** (Google Cloud Console → OAuth client):
   - Google login: `https://<your-domain>/api/auth/google/callback`
@@ -490,7 +494,10 @@ pytest
 
 ## Troubleshooting
 
-- **Sync returns 400 “Gmail authorization required”**: open `GET /api/gmail/auth` in a browser and complete consent once; verify `backend/credentials.json` exists.
+- **Sync returns 400 “Gmail authorization required”**: complete Gmail OAuth for your user:
+  - in UI: click the Gmail connect/sync button, or
+  - in browser: open `GET /api/gmail/auth?token=<JWT>` and complete consent once
+  Then retry sync; verify `CREDENTIALS_PATH` exists (or `GMAIL_CREDENTIALS_JSON` is set in containers).
 - **OAuth “redirect_uri_mismatch”**: your Google OAuth client must include the exact redirect URI used by the flow:
   - Gmail: `GMAIL_OAUTH_REDIRECT_URI` (e.g. `https://<your-domain>/api/gmail/callback`)
   - Login: `GOOGLE_REDIRECT_URI` (e.g. `https://<your-domain>/api/auth/google/callback`)
@@ -506,7 +513,7 @@ pytest
 - **DB:** Run `alembic upgrade head` to apply migrations. New columns on `applications` are nullable; new tables (`sync_state`, `companies`, `classification_cache`) are created by migrations.
 - **Secrets:** Keep all sensitive config in `backend/.env`. Do **not** commit `.env` or `credentials.json` (add them to `.gitignore`).
 - **OAuth CSRF:** When `GMAIL_OAUTH_REDIRECT_URI` is set, the Gmail OAuth flow uses a cryptographically random `state` parameter, stores it server-side, and validates it on callback to mitigate CSRF. Without that redirect URI, the local `run_local_server` flow does not use state.
-- **Token storage:** JWTs are typically stored in the frontend (e.g. localStorage). This is convenient but increases exposure if XSS occurs; consider HTTP-only cookies or stronger CSP/sanitization for production. Gmail OAuth tokens are written to `token.pickle` with file mode `0o600`; the file is unencrypted—for production, consider encrypting at rest or using a secrets manager.
+- **Token storage:** JWTs are typically stored in the frontend (e.g. localStorage). This is convenient but increases exposure if XSS occurs; consider HTTP-only cookies or stronger CSP/sanitization for production. Gmail OAuth tokens are written with file mode `0o600`. **For multi-user deployments, set `TOKEN_DIR` so tokens are stored per-user as `token_<user_id>.pickle`** (avoids cross-user token reuse). Token files are unencrypted—for production, consider encrypting at rest or using a secrets manager.
 
 ---
 
