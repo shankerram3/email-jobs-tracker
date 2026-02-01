@@ -1,0 +1,106 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: jobtracker
+      POSTGRES_PASSWORD: jobtracker
+      POSTGRES_DB: jobtracker
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobtracker -d jobtracker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      # Core runtime
+      DATABASE_URL: postgresql://jobtracker:jobtracker@db:5432/jobtracker
+      REDIS_URL: redis://redis:6379/0
+
+      # Auth (set at least one; prefer SECRET_KEY)
+      SECRET_KEY: ${SECRET_KEY:-}
+      API_KEY: ${API_KEY:-}
+      API_KEY_HEADER: ${API_KEY_HEADER:-X-API-Key}
+
+      # AI
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+
+      # Gmail OAuth in Docker: use redirect-based flow (avoid run_local_server)
+      # Register this redirect URI in Google Cloud OAuth client settings.
+      GMAIL_OAUTH_REDIRECT_URI: ${GMAIL_OAUTH_REDIRECT_URI:-http://localhost:8000/api/gmail/callback}
+      # Provide your OAuth client JSON on the host at backend/credentials.json
+      CREDENTIALS_PATH: /host_backend/credentials.json
+      TOKEN_PATH: /data/token.pickle
+
+      # CORS (not strictly needed when using the frontend nginx proxy, but harmless)
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173","http://localhost:3000"]}
+
+    volumes:
+      # Mount host backend directory read-only so credentials.json can be provided without breaking compose startup.
+      - ./backend:/host_backend:ro
+      # Persist Gmail token across restarts
+      - gmail_data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    command: celery -A app.celery_app worker -l info
+    environment:
+      DATABASE_URL: postgresql://jobtracker:jobtracker@db:5432/jobtracker
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-}
+      API_KEY: ${API_KEY:-}
+      API_KEY_HEADER: ${API_KEY_HEADER:-X-API-Key}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GMAIL_OAUTH_REDIRECT_URI: ${GMAIL_OAUTH_REDIRECT_URI:-http://localhost:8000/api/gmail/callback}
+      CREDENTIALS_PATH: /host_backend/credentials.json
+      TOKEN_PATH: /data/token.pickle
+    volumes:
+      - ./backend:/host_backend:ro
+      - gmail_data:/data
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  gmail_data:
+

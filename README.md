@@ -279,6 +279,26 @@ Then:
 
 ---
 
+## Quickstart (Docker)
+
+This brings up **Postgres + Redis + backend + Celery worker + frontend**.
+
+1. Ensure you have a Google OAuth client JSON at `backend/credentials.json` (not committed).
+2. Export required env vars (or put them in a local `.env` file next to `docker-compose.yml`):
+   - `OPENAI_API_KEY`
+   - `SECRET_KEY` (recommended) or `API_KEY`
+3. Start the stack:
+
+```bash
+docker compose up --build
+```
+
+Open the app at `http://localhost:5173`.
+
+**Gmail OAuth in Docker**: the compose config sets `GMAIL_OAUTH_REDIRECT_URI` to `http://localhost:8000/api/gmail/callback`. Add that redirect URI to your Google Cloud OAuth client, then open `http://localhost:8000/api/gmail/auth?redirect_url=http://localhost:5173`.
+
+---
+
 ## Setup
 
 ### Backend
