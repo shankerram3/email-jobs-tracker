@@ -181,3 +181,37 @@ class ClassificationAnalytics(BaseModel):
     by_stage: dict
     action_required_count: int
     avg_confidence: Optional[float] = None
+
+
+# =============================================================================
+# Reprocess pipeline schemas
+# =============================================================================
+
+
+class ReprocessStartRequest(BaseModel):
+    """Start a DB reprocess job for existing applications."""
+
+    only_needs_review: bool = True
+    min_confidence: Optional[float] = None
+    limit: int = 500
+    batch_size: int = 25
+    dry_run: bool = False
+
+
+class ReprocessStartResponse(BaseModel):
+    task_id: str
+    status: str = "queued"
+
+
+class ReprocessStatusResponse(BaseModel):
+    status: str = "idle"
+    message: str = ""
+    processed: int = 0
+    total: int = 0
+    error: Optional[str] = None
+    task_id: Optional[str] = None
+    params: Optional[dict] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    celery_state: Optional[str] = None

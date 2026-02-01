@@ -47,15 +47,18 @@ def _run_sync_task(mode: str, user_id: int, after_date: Optional[str] = None, be
         )
         if result.get("error"):
             set_error(result["error"], user_id)
+            session.rollback()
             set_sync_state_error(session, result["error"], user_id)
         else:
             set_idle(result, user_id)
             set_sync_state_idle(session, result, user_id)
     except GmailAuthRequiredError as e:
         set_error(str(e), user_id)
+        session.rollback()
         set_sync_state_error(session, str(e), user_id)
     except Exception as e:
         set_error(str(e), user_id)
+        session.rollback()
         set_sync_state_error(session, str(e), user_id)
     finally:
         session.close()

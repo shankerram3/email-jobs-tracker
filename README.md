@@ -12,11 +12,16 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 - [Project structure](#project-structure)
 - [Database schema](#database-schema)
 - [Environment variables](#environment-variables)
+- [Prerequisites](#prerequisites)
+- [Quickstart (local)](#quickstart-local)
 - [Setup](#setup)
 - [Sync modes and Gmail auth](#sync-modes-and-gmail-auth)
+- [Reprocessing (re-run LangGraph on existing rows)](#reprocessing-re-run-langgraph-on-existing-rows)
 - [API reference](#api-reference)
 - [Analytics](#analytics)
 - [Testing](#testing)
+- [Deployment notes](#deployment-notes)
+- [Troubleshooting](#troubleshooting)
 - [Migration and security](#migration-and-security)
 - [License](#license)
 
@@ -41,7 +46,7 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 | **LangGraph pipeline** | Multi-node flow that produces `email_class` + entities + stage + action items |
 | **Job title extraction helper** | Deterministic title candidate extraction + cleaning + fallback when the model returns `null` |
 | **Sync state** | In-memory progress (processed/total/message) for `/sync-status` and SSE; DB state (historyId, last_synced_at) for incremental |
-| **Celery (optional)** | Async sync task; requires Redis as broker (if not used, sync runs in-process via BackgroundTasks) |
+| **Celery (required for reprocess)** | Used by `/api/reprocess/*` to re-run LangGraph on existing rows (requires Redis). Email sync (`/api/sync-emails`) currently runs via FastAPI `BackgroundTasks`. |
 | **Frontend** | React + Vite; lists applications, triggers sync, shows SSE progress; analytics dashboard |
 
 ### Data flow
@@ -176,36 +181,101 @@ When the model returns a missing/`null` job title, the backend now attempts a sa
 
 Create `backend/.env` (do not commit). All settings are read via `config.Settings` (pydantic-settings from `.env`).
 
+Notes:
+
+- **Case-insensitive**: settings keys are not case-sensitive. Examples below use `UPPER_SNAKE_CASE`, but `database_url` works too.
+- **Do not paste secrets into the README**: treat `.env` as sensitive and keep it out of git history.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | **Database** | | |
-| `DATABASE_URL` | `sqlite:///./job_tracker.db` | SQLAlchemy URL (SQLite or PostgreSQL). |
-| **Gmail** | | |
-| `credentials_path` | `credentials.json` | Path to Google OAuth client JSON (relative to backend or absolute). |
-| `token_path` | `token.pickle` | Path to store OAuth token. |
-| `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, OAuth uses this as redirect_uri (e.g. `http://localhost:8000/api/gmail/callback`) and validates a CSRF `state` parameter. Add this exact URI to your Google OAuth client’s redirect URIs. |
+| `DATABASE_URL` | `sqlite:///./job_tracker.db` | SQLAlchemy URL (SQLite or Postgres). |
+| `SUPABASE_SSL_CA_FILE` | (none) | Optional CA bundle path for Supabase/managed Postgres SSL verification (relative paths resolve under `backend/`). |
+| `DB_POOL_SIZE` | `5` | SQLAlchemy pool size (Postgres only). |
+| `DB_MAX_OVERFLOW` | `10` | SQLAlchemy max overflow (Postgres only). |
+| `DB_POOL_TIMEOUT_S` | `30` | Pool checkout timeout (seconds). |
+| `DB_POOL_RECYCLE_S` | `1800` | Pool recycle interval (seconds). |
+| `SQLITE_BUSY_TIMEOUT_MS` | `5000` | Busy timeout for SQLite concurrency. |
+| **Gmail OAuth (sync)** | | |
+| `CREDENTIALS_PATH` | `credentials.json` | Path to Google OAuth client JSON (relative to `backend/` or absolute). |
+| `TOKEN_PATH` | `token.pickle` | Path to store Gmail OAuth token (file is written with `0o600`). |
+| `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, `/api/gmail/auth` uses a redirect-based OAuth flow with CSRF `state` and callback at `/api/gmail/callback` (e.g. `http://localhost:8000/api/gmail/callback`). Add this exact URI to your Google OAuth client’s redirect URIs. |
 | **AI** | | |
 | `OPENAI_API_KEY` | `""` | Required for LLM classification. |
+| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model name used by LangGraph pipeline. |
+| `OPENAI_TEMPERATURE` | `0.2` | Sampling temperature for the model. |
 | **CORS** | | |
-| `CORS_ORIGINS` | `["http://localhost:3000", "http://localhost:5173"]` | Allowed origins (list). |
+| `CORS_ORIGINS` | `["http://localhost:3000", "http://localhost:5173"]` | Allowed origins (JSON array). |
 | **Redis / Celery** | | |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL (Celery broker and optional cache). |
-| `CELERY_BROKER_URL` | (uses REDIS_URL) | Override Celery broker. |
-| **Auth** | | |
-| `SECRET_KEY` | `""` | JWT signing key; if set, login returns JWT. Required for protected routes unless `API_KEY` is set. |
-| `API_KEY` | `""` | Optional static API key (sent in header). When set, protected routes accept this instead of JWT. |
-| `API_KEY_USER_ID` | (none) | When set, API key auth resolves to this user id (use in multi-user deployments so the key does not expose the first user’s data). |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL (Celery broker/backend; also used as L1 classification cache). |
+| `CELERY_BROKER_URL` | (uses `REDIS_URL`) | Override Celery broker URL. |
+| **Auth (API)** | | |
+| `SECRET_KEY` | `""` | JWT signing key. Required for `POST /api/login` and Bearer JWT auth. |
+| `API_KEY` | `""` | Optional static API key (header auth). |
+| `API_KEY_USER_ID` | (none) | If set, API key maps to this user id (recommended for multi-user deployments). |
 | `API_KEY_HEADER` | `X-API-Key` | Header name for API key. |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm. |
-| `JWT_EXPIRE_MINUTES` | `10080` | JWT expiry (7 days). |
+| `JWT_EXPIRE_MINUTES` | `10080` | JWT expiry in minutes (7 days). |
+| **Google OAuth (Sign in with Google)** | | |
+| `GOOGLE_CLIENT_ID` | `""` | OAuth client id for the app’s “Sign in with Google” flow (separate from Gmail OAuth client JSON). |
+| `GOOGLE_CLIENT_SECRET` | `""` | OAuth client secret for the app’s “Sign in with Google” flow. |
+| `GOOGLE_REDIRECT_URI` | (none) | Redirect URI for Google login callback (e.g. `http://localhost:8000/api/auth/google/callback`). |
 | **Gmail limits / full sync** | | |
 | `GMAIL_HISTORY_MAX_RESULTS` | `100` | History API batch size. |
 | `GMAIL_MESSAGES_MAX_RESULTS` | `100` | Messages per request. |
 | `GMAIL_SYNC_PAGE_SIZE` | `100` | Pagination page size. |
-| `GMAIL_FULL_SYNC_MAX_PER_QUERY` | `2000` | Max emails per full-sync query. |
+| `GMAIL_FULL_SYNC_MAX_PER_QUERY` | `2000` | Max emails to fetch per query during full sync. |
 | `GMAIL_FULL_SYNC_AFTER_DATE` | (none) | Override “after” date for full sync (YYYY/MM/DD or YYYY-MM-DD). |
 | `GMAIL_FULL_SYNC_DAYS_BACK` | `90` | Days back for full sync when no override date. |
-| `GMAIL_FULL_SYNC_IGNORE_LAST_SYNCED` | `false` | If true, ignore last_synced_at for full sync and use after_date/days_back. |
+| `GMAIL_FULL_SYNC_IGNORE_LAST_SYNCED` | `false` | If true, ignore `last_synced_at` during full sync and use `after_date/days_back`. |
+| **Ingestion + classification tuning** | | |
+| `CLASSIFICATION_MAX_CONCURRENCY` | `15` | Max concurrent LLM calls (rate-limit protection). |
+| `CLASSIFICATION_BATCH_SIZE` | `10` | Emails per LLM batch call (0 disables batching). |
+| `CLASSIFICATION_USE_BATCH_PROMPT` | `true` | Enable batch prompting. |
+| `CLASSIFICATION_BATCH_CONFIDENCE_THRESHOLD` | `0.6` | Low-confidence “important” emails are reprocessed individually. |
+| `INGESTION_WORKERS` | `6` | Worker threads used to run LangGraph calls. |
+| `INGESTION_BATCH_SIZE` | `25` | Emails per batch shard assigned to a worker. |
+
+---
+
+## Prerequisites
+
+- **Python**: 3.10+ recommended
+- **Node**: 18+ recommended (Vite + React)
+- **Google Cloud**: Gmail API enabled + OAuth client JSON for Gmail sync
+- **Redis**: required if you use Celery reprocessing (and beneficial for cache)
+
+---
+
+## Quickstart (local)
+
+```bash
+# Backend
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Apply migrations
+alembic upgrade head
+
+# Run API (http://localhost:8000)
+./run.sh
+```
+
+In another terminal:
+
+```bash
+# Frontend (http://localhost:5173)
+cd frontend
+npm install
+npm run dev
+```
+
+Then:
+
+- Open **`GET /api/gmail/auth`** once in your browser to grant Gmail access
+- Use the UI to trigger sync, or call `POST /api/sync-emails`
 
 ---
 
@@ -224,9 +294,8 @@ Create `backend/.env` (do not commit). All settings are read via `config.Setting
 2. **Environment:** Create `backend/.env` and set at least:
    - `OPENAI_API_KEY` — required for email classification
    - `DATABASE_URL` — optional (default SQLite)
-   - `REDIS_URL` — if using Celery (default `redis://localhost:6379/0`)
-   - `SECRET_KEY` — for JWT; use `POST /api/login` to get a token (or set `API_KEY` for header auth)
-   - `API_KEY` — optional static API key (header: `X-API-Key` by default). Protected routes require either JWT or API key.
+   - `SECRET_KEY` (JWT) and/or `API_KEY` (header auth) — required for protected routes (sync, apps, analytics, reprocess)
+   - `REDIS_URL` — required if you use Celery reprocessing; also used for the L1 classification cache
 
 3. **Gmail OAuth:** Place Google OAuth client JSON at `backend/credentials.json` (APIs & Services → Credentials → OAuth 2.0 Client ID → download JSON). Then open **`GET /api/gmail/auth`** in a browser to authorize; after that, sync can run in the background.
 
@@ -271,6 +340,28 @@ App: http://localhost:5173 (proxies `/api` to backend).
 
 ---
 
+## Reprocessing (re-run LangGraph on existing rows)
+
+Reprocessing is meant for “fix-ups” after prompt/model/schema changes (e.g. add new extracted fields, recompute `needs_review`, improve job title extraction, etc.).
+
+- **How it runs**: via **Celery** (`/api/reprocess/start` enqueues a job; progress is stored in the `reprocess_state` table).
+- **Requirements**: Redis + a running Celery worker.
+
+Start a worker:
+
+```bash
+cd backend
+source .venv/bin/activate
+celery -A app.celery_app worker -l info
+```
+
+Then call:
+
+- `POST /api/reprocess/start`
+- Poll `GET /api/reprocess/status` until `status` becomes `idle` or `error`
+
+---
+
 ## API reference
 
 Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API-Key: <key>` when configured.
@@ -294,6 +385,13 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 | POST | `/api/sync-emails` | Query: `mode=auto\|incremental\|full` | Start sync in background; returns immediately. |
 | GET | `/api/sync-status` | — | Current sync progress for this user: status, message, processed, total, created, skipped, errors, error. |
 | GET | `/api/sync-events` | Optional: `token` (for SSE without custom headers) | SSE stream of sync progress for this user until status is idle or error. |
+
+### Reprocess
+
+| Method | Path | Body / Query | Description |
+|--------|------|--------------|-------------|
+| POST | `/api/reprocess/start` | Body: `ReprocessStartRequest` | Enqueue a Celery task to re-run LangGraph over existing `applications` rows. |
+| GET | `/api/reprocess/status` | — | Returns progress from DB (`processed/total/message`) plus `celery_state` when available. |
 
 ### LangGraph (debug / reprocess)
 
@@ -339,6 +437,25 @@ pytest
 ```
 
 (Adjust for your test layout and markers if any.)
+
+---
+
+## Deployment notes
+
+- **Frontend dev proxy**: Vite proxies `/api` to `http://127.0.0.1:8000` (IPv4) to avoid macOS IPv6 `localhost -> ::1` connection issues.
+- **Production DB**: use Postgres (`DATABASE_URL`). If you connect to Supabase/managed Postgres with strict SSL verification, set `SUPABASE_SSL_CA_FILE` and keep `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` modest.
+- **Workers**: `/api/reprocess/*` requires Celery + Redis. `/api/sync-emails` currently runs in-process (FastAPI background task); if you need “sync survives API restarts”, wire sync into Celery similarly.
+- **Secrets**: prefer a secrets manager in production; keep `.env`, `credentials.json`, and `token.pickle` out of containers/images and out of git.
+
+---
+
+## Troubleshooting
+
+- **Sync returns 400 “Gmail authorization required”**: open `GET /api/gmail/auth` in a browser and complete consent once; verify `backend/credentials.json` exists.
+- **OAuth “redirect_uri_mismatch”**: your Google OAuth client must include the exact `GMAIL_OAUTH_REDIRECT_URI` value (if you set it), e.g. `http://localhost:8000/api/gmail/callback`.
+- **SSE auth from browser**: `EventSource` can’t set headers; use `GET /api/sync-events?token=<JWT>` if you’re using JWT auth.
+- **ECONNREFUSED from frontend**: ensure backend is running on port 8000 and frontend on 5173; Vite proxies to `127.0.0.1` by design.
+- **Reprocess stuck in “queued”**: confirm Redis is running and a Celery worker is started in `backend/` with the same `.env`.
 
 ---
 

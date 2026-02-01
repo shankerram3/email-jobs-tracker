@@ -120,6 +120,28 @@ class SyncState(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ReprocessState(Base):
+    """DB-backed progress for reprocessing existing applications (per user)."""
+    __tablename__ = "reprocess_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    status = Column(String, default="idle")  # idle, running, error
+    message = Column(String(255), nullable=True)
+    error = Column(Text, nullable=True)
+
+    processed = Column(Integer, default=0, nullable=True)
+    total = Column(Integer, default=0, nullable=True)
+
+    task_id = Column(String(128), nullable=True, index=True)  # Celery task id (if used)
+    params = Column(JSON, nullable=True)  # request scope (filters, options)
+
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class OAuthState(Base):
     """OAuth CSRF state for Gmail and Google Sign-in (shared store)."""
     __tablename__ = "oauth_state"

@@ -63,6 +63,7 @@ def upgrade() -> None:
             sa.Column("resume_version", sa.String(), nullable=True),
             sa.Column("processing_status", sa.String(), nullable=True),
             sa.Column("processed_by", sa.String(), nullable=True),
+            sa.Column("needs_review", sa.Boolean(), nullable=True),
             sa.PrimaryKeyConstraint("id"),
         )
         table_names.add("applications")
@@ -183,6 +184,8 @@ def upgrade() -> None:
             op.add_column("applications", sa.Column("offer_at", sa.DateTime(), nullable=True))
         if "linkedin_url" not in cols:
             op.add_column("applications", sa.Column("linkedin_url", sa.String(), nullable=True))
+        if "needs_review" not in cols:
+            op.add_column("applications", sa.Column("needs_review", sa.Boolean(), nullable=True))
 
     # Create indexes on applications (idempotent: check if index exists)
     if "applications" in table_names:
