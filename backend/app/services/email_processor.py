@@ -623,76 +623,6 @@ def run_sync_with_options(
 
         pending.append((i, mid, subject, sender, body, received_iso))
 
-<<<<<<< Updated upstream
-    # Phase 2: LangGraph classification (batch + parallel fallback)
-    llm_results: dict[int, Tuple[Optional[dict], Optional[Exception]]] = {}
-    max_concurrency = max(1, getattr(settings, "classification_max_concurrency", 15))
-    batch_size = max(1, getattr(settings, "classification_batch_size", 10))
-    use_batch = getattr(settings, "classification_use_batch_prompt", True)
-
-    def _run_langgraph(item: PendingItem) -> Tuple[int, Optional[dict], Optional[Exception]]:
-        """Fallback: process single email."""
-        idx, mid, subject, sender, body, received_iso = item
-        try:
-            result = langgraph_process_email(
-                email_id=mid,
-                subject=subject,
-                body=body,
-                sender=sender,
-                received_date=received_iso or "",
-            )
-            return (idx, result, None)
-        except Exception as e:
-            return (idx, None, e)
-
-    if pending:
-        progress(total - len(pending), total, "Classifying…")
-
-        if use_batch and batch_size > 1:
-            # Try batch processing first (fewer API calls)
-            logger.info(f"Using batch LLM classification (batch_size={batch_size})")
-
-            # Convert pending items to batch format
-            email_dicts = [
-                {
-                    "email_id": mid,
-                    "subject": subject,
-                    "body": body,
-                    "sender": sender,
-                    "received_date": received_iso or "",
-                }
-                for idx, mid, subject, sender, body, received_iso in pending
-            ]
-
-            try:
-                confidence_threshold = getattr(settings, "classification_batch_confidence_threshold", 0.6)
-                batch_results = langgraph_process_batch(
-                    email_dicts,
-                    batch_size=batch_size,
-                    confidence_threshold=confidence_threshold,
-                )
-                if batch_results and len(batch_results) == len(pending):
-                    # Store results with original indices
-                    for i, (item, result) in enumerate(zip(pending, batch_results)):
-                        llm_results[item[0]] = (result, None)
-                    logger.info(f"Batch classification complete: {len(batch_results)} emails")
-                else:
-                    # Batch failed, fall back to parallel per-email
-                    logger.warning("Batch classification failed, falling back to parallel per-email")
-                    use_batch = False
-            except Exception as e:
-                logger.warning(f"Batch classification error: {e}, falling back to parallel per-email")
-                use_batch = False
-
-        if not use_batch or not llm_results:
-            # Parallel per-email fallback
-            logger.info(f"Using parallel per-email classification (concurrency={max_concurrency})")
-            with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-                futures = {executor.submit(_run_langgraph, item): item for item in pending}
-                for fut in as_completed(futures):
-                    idx, result, err = fut.result()
-                    llm_results[idx] = (result, err)
-=======
     # Phase 2+3: shard into batches, run LangGraph in worker threads, persist in a single-writer loop.
     processed_so_far = total - len(pending)
     progress(processed_so_far, total, "Classifying…")
@@ -728,7 +658,6 @@ def run_sync_with_options(
         assignments: list[list[int]] = [[] for _ in range(worker_count)]
         for bidx in range(len(batches)):
             assignments[bidx % worker_count].append(bidx)
->>>>>>> Stashed changes
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [executor.submit(_worker, wid, assignments[wid], batches) for wid in range(worker_count)]
@@ -745,27 +674,6 @@ def run_sync_with_options(
                     kind, item, structured, err_text = results_q.get(timeout=0.2)
                 except queue.Empty:
                     continue
-
-<<<<<<< Updated upstream
-        received = _parse_received(received_iso)
-        email_class = structured.get("email_class")
-        company_name = structured.get("company_name") or "Unknown"
-        job_title = structured.get("job_title")
-        if email_class in APPLICATION_LIKE_CLASSES and duplicate_detector.is_duplicate(company_name, job_title, received):
-            logger.info(f"Email {idx+1}/{total}: DUPLICATE (msg_id={mid})")
-            skipped += 1
-            skipped_duplicate += 1
-            continue
-
-        logger.info(f"Email {idx+1}/{total}: CREATING (msg_id={mid}, class={email_class})")
-        _create_application_and_log(db, mid, user_id, structured, subject, sender, body, received, commit=False)
-        duplicate_detector.add_application(company_name, job_title)
-        created += 1
-        pending_commits += 1
-        if pending_commits >= BATCH_COMMIT_SIZE:
-            db.commit()
-            pending_commits = 0
-=======
                 idx, mid, subject, sender, body, received_iso = item
                 processed_so_far += 1
                 progress(processed_so_far, total, "Classifying…")
@@ -830,7 +738,6 @@ def run_sync_with_options(
                 if pending_commits >= BATCH_COMMIT_SIZE:
                     _commit_with_retry(db, max_retries=6)
                     pending_commits = 0
->>>>>>> Stashed changes
 
     if pending_commits > 0:
         _commit_with_retry(db, max_retries=6)
