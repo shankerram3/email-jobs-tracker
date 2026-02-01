@@ -107,7 +107,7 @@ When the model returns a missing/`null` job title, the backend now attempts a sa
 
 - **Backend:** FastAPI (Python), Gmail API (history + search), OpenAI (LangGraph + structured JSON), SQLAlchemy (SQLite/PostgreSQL), Alembic (migrations), Celery + Redis (optional async jobs), SSE (sync progress)
 - **Frontend:** React, Vite, Recharts, Axios
-- **Auth:** JWT (HS256) or static API key in header. Protected endpoints (applications, sync, analytics) require authentication; if neither `SECRET_KEY` nor `API_KEY` is set, those routes return 401. Set at least one for normal use (e.g. `SECRET_KEY` and use `POST /api/login`, or `API_KEY` in header).
+- **Auth:** JWT (HS256) or static API key in header. **Auth must be configured**: set `SECRET_KEY` (JWT) or set `API_KEY` **and** `API_KEY_USER_ID` (API key maps to a specific user). No anonymous mode in production.
 
 ---
 
@@ -199,7 +199,8 @@ Notes:
 | **Gmail OAuth (sync)** | | |
 | `CREDENTIALS_PATH` | `credentials.json` | Path to Google OAuth client JSON (relative to `backend/` or absolute). |
 | `TOKEN_PATH` | `token.pickle` | Path to store Gmail OAuth token (file is written with `0o600`). |
-| `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, `/api/gmail/auth` uses a redirect-based OAuth flow with CSRF `state` and callback at `/api/gmail/callback` (e.g. `http://localhost:8000/api/gmail/callback`). Add this exact URI to your Google OAuth client’s redirect URIs. |
+| `GMAIL_OAUTH_REDIRECT_URI` | (none) | If set, `/api/gmail/auth` uses a redirect-based OAuth flow with CSRF `state` and callback at `/api/gmail/callback` (e.g. `https://<your-domain>/api/gmail/callback`). Add this exact URI to your Google OAuth client’s redirect URIs. |
+| `GMAIL_CREDENTIALS_JSON` | (none) | **(Railway/containers)** Paste the full contents of `credentials.json` here; the container entrypoint writes it to `CREDENTIALS_PATH` at startup. |
 | **AI** | | |
 | `OPENAI_API_KEY` | `""` | Required for LLM classification. |
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model name used by LangGraph pipeline. |
@@ -207,12 +208,12 @@ Notes:
 | **CORS** | | |
 | `CORS_ORIGINS` | `["http://localhost:3000", "http://localhost:5173"]` | Allowed origins (JSON array). |
 | **Redis / Celery** | | |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL (Celery broker/backend; also used as L1 classification cache). |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL (Celery broker/backend; also used as L1 classification cache). **On Railway, do not use localhost**—use the Redis service connection URL. |
 | `CELERY_BROKER_URL` | (uses `REDIS_URL`) | Override Celery broker URL. |
 | **Auth (API)** | | |
 | `SECRET_KEY` | `""` | JWT signing key. Required for `POST /api/login` and Bearer JWT auth. |
 | `API_KEY` | `""` | Optional static API key (header auth). |
-| `API_KEY_USER_ID` | (none) | If set, API key maps to this user id (recommended for multi-user deployments). |
+| `API_KEY_USER_ID` | (none) | **Required when using `API_KEY`**. API key resolves to this user id (multi-user safe). |
 | `API_KEY_HEADER` | `X-API-Key` | Header name for API key. |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm. |
 | `JWT_EXPIRE_MINUTES` | `10080` | JWT expiry in minutes (7 days). |
@@ -356,7 +357,11 @@ App: http://localhost:5173 (proxies `/api` to backend).
 - **Full (`mode=full`):** Gmail search by subject/from, paginated; respects `GMAIL_FULL_SYNC_*` (max per query, after date, days back, ignore last_synced).
 - **Incremental (`mode=incremental`):** Uses `sync_state.last_history_id` and Gmail history API.
 
-**Gmail auth:** Sync must have valid OAuth credentials. The backend checks “credentials ready for background” before starting. If not, it returns 400 and tells the user to open **`GET /api/gmail/auth`** in the browser. Optional query: `?redirect_url=http://localhost:5173` to return to the app after auth. For CSRF protection, set **`GMAIL_OAUTH_REDIRECT_URI`** (e.g. `http://localhost:8000/api/gmail/callback`) and add that URI to your Google OAuth client; the flow will use **`GET /api/gmail/callback`** and validate the `state` parameter.
+**Gmail auth:** Sync must have valid OAuth credentials. The backend checks “credentials ready for background” before starting. If not, it returns 400 and tells the user to open **`GET /api/gmail/auth`** in the browser.
+
+- **Redirect after consent (recommended):** `GET /api/gmail/auth?redirect_url=https://<your-domain>`
+- **Production default:** if `redirect_url` is omitted, the backend redirects to the current request origin.
+- **Redirect-based OAuth (recommended for Railway/containers):** set `GMAIL_OAUTH_REDIRECT_URI=https://<your-domain>/api/gmail/callback` and add it to the OAuth client redirect URIs in Google Cloud.
 
 ---
 
@@ -400,7 +405,7 @@ Base URL: `http://localhost:8000`. Auth: `Authorization: Bearer <JWT>` or `X-API
 
 | Method | Path | Query / Body | Description |
 |--------|------|--------------|-------------|
-| GET | `/api/gmail/auth` | Optional: `redirect_url` | Redirects to Gmail OAuth; after consent, redirects to `redirect_url` or localhost:5173. When `GMAIL_OAUTH_REDIRECT_URI` is set, uses CSRF state. |
+| GET | `/api/gmail/auth` | Optional: `redirect_url` | Redirects to Gmail OAuth; after consent, redirects to `redirect_url` (or current request origin). When `GMAIL_OAUTH_REDIRECT_URI` is set, uses CSRF state. |
 | GET | `/api/gmail/callback` | `code`, `state` (from Google) | OAuth callback when `GMAIL_OAUTH_REDIRECT_URI` is set; validates state and exchanges code for token. |
 | POST | `/api/sync-emails` | Query: `mode=auto\|incremental\|full` | Start sync in background; returns immediately. |
 | GET | `/api/sync-status` | — | Current sync progress for this user: status, message, processed, total, created, skipped, errors, error. |
@@ -469,13 +474,30 @@ pytest
 
 ---
 
+### Railway (production checklist)
+
+- **Redis**: create a Railway Redis service and set `REDIS_URL` to its connection URL (**not** `redis://localhost:6379/0`).
+- **Persistent token storage**: add a Railway Volume mounted at `/data` and set:
+  - `CREDENTIALS_PATH=/data/credentials.json`
+  - `TOKEN_PATH=/data/token.pickle`
+  - `GMAIL_CREDENTIALS_JSON=<paste credentials.json contents>`
+- **OAuth redirect URIs** (Google Cloud Console → OAuth client):
+  - Google login: `https://<your-domain>/api/auth/google/callback`
+  - Gmail sync: `https://<your-domain>/api/gmail/callback`
+- **CORS**: set `CORS_ORIGINS=["https://<your-domain>"]`
+
+---
+
 ## Troubleshooting
 
 - **Sync returns 400 “Gmail authorization required”**: open `GET /api/gmail/auth` in a browser and complete consent once; verify `backend/credentials.json` exists.
-- **OAuth “redirect_uri_mismatch”**: your Google OAuth client must include the exact `GMAIL_OAUTH_REDIRECT_URI` value (if you set it), e.g. `http://localhost:8000/api/gmail/callback`.
+- **OAuth “redirect_uri_mismatch”**: your Google OAuth client must include the exact redirect URI used by the flow:
+  - Gmail: `GMAIL_OAUTH_REDIRECT_URI` (e.g. `https://<your-domain>/api/gmail/callback`)
+  - Login: `GOOGLE_REDIRECT_URI` (e.g. `https://<your-domain>/api/auth/google/callback`)
 - **SSE auth from browser**: `EventSource` can’t set headers; use `GET /api/sync-events?token=<JWT>` if you’re using JWT auth.
 - **ECONNREFUSED from frontend**: ensure backend is running on port 8000 and frontend on 5173; Vite proxies to `127.0.0.1` by design.
 - **Reprocess stuck in “queued”**: confirm Redis is running and a Celery worker is started in `backend/` with the same `.env`.
+- **Redis unavailable on Railway**: if logs show `Error 111 connecting to localhost:6379`, your `REDIS_URL` is pointing at localhost. Use the Railway Redis service URL.
 
 ---
 
