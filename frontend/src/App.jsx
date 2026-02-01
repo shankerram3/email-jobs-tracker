@@ -306,6 +306,31 @@ function TrackerApp({ logout, user }) {
   const [syncFromDate, setSyncFromDate] = useState('')
   const [syncToDate, setSyncToDate] = useState('')
   const [syncProgress, setSyncProgress] = useState(null)
+
+  const getSyncProgressDetail = (progress) => {
+    if (!progress) return { headline: '', meta: '', hint: '' }
+    const baseMessage = progress.message || 'Syncing inbox'
+    const hasTotal = progress.total > 0
+    const percent = hasTotal
+      ? Math.min(100, Math.round((progress.processed / progress.total) * 100))
+      : null
+    const meta = hasTotal
+      ? `${percent}% • ${progress.processed} of ${progress.total}`
+      : 'Estimating inbox size…'
+    let hint = 'Working through your latest updates.'
+    if (baseMessage.toLowerCase().includes('connecting')) {
+      hint = 'Warming up the connection and preparing the pipeline.'
+    } else if (baseMessage.toLowerCase().includes('fetching')) {
+      hint = 'Pulling new messages and deduplicating results.'
+    } else if (baseMessage.toLowerCase().includes('classifying')) {
+      hint = 'Sorting stages and extracting details.'
+    }
+    return {
+      headline: baseMessage,
+      meta,
+      hint,
+    }
+  }
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
   const [analytics, setAnalytics] = useState({ funnel: null, responseRate: null, timeToEvent: null, prediction: null })
@@ -576,15 +601,19 @@ function TrackerApp({ logout, user }) {
         )}
 
         {syncing && syncProgress && (
+        (() => {
+          const details = getSyncProgressDetail(syncProgress)
+          return (
         <div className="sync-progress">
           <div className="sync-progress-header">
-            <span className="sync-progress-message">{syncProgress.message}</span>
+            <span className="sync-progress-message">{details.headline}</span>
             {syncProgress.total > 0 && (
               <span className="sync-progress-count">
                 {syncProgress.processed} / {syncProgress.total}
               </span>
             )}
           </div>
+          <div className="sync-progress-meta">{details.meta}</div>
           <div className="sync-progress-bar-wrap">
             <div
               className="sync-progress-bar-fill"
@@ -596,12 +625,15 @@ function TrackerApp({ logout, user }) {
               }}
             />
           </div>
+          <div className="sync-progress-hint">{details.hint}</div>
           {syncProgress.status === 'idle' && syncProgress.processed > 0 && (
             <div className="sync-progress-summary">
               Done: {syncProgress.created} new, {syncProgress.skipped} skipped, {syncProgress.errors} errors
             </div>
           )}
         </div>
+          )
+        })()
         )}
 
         {view === 'dashboard' && (

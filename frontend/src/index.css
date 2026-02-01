@@ -688,8 +688,8 @@ header h1 {
 }
 
 .sync-progress-message {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.9rem;
+  font-weight: 600;
   color: var(--text);
 }
 
@@ -699,23 +699,35 @@ header h1 {
   font-variant-numeric: tabular-nums;
 }
 
+.sync-progress-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+}
+
 .sync-progress-bar-wrap {
-  height: 6px;
-  background: var(--border);
-  border-radius: 3px;
+  height: 8px;
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 999px;
   overflow: hidden;
 }
 
 .sync-progress-bar-fill {
   height: 100%;
-  background: var(--accent);
-  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), rgba(45, 212, 191, 0.85));
+  border-radius: 999px;
   transition: width 0.25s ease;
 }
 
 @keyframes sync-indeterminate {
   0% { transform: translateX(-100%); }
-  100% { transform: translateX(400%); }
+  100% { transform: translateX(300%); }
+}
+
+.sync-progress-hint {
+  margin-top: var(--space-2);
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .sync-progress-summary {

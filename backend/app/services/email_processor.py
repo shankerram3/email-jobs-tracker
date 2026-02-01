@@ -255,6 +255,8 @@ _CACHE_SAFE_FIELDS = {
     "email_class",
     "confidence",
     "classification_reasoning",
+    "needs_review",
+    "processing_status",
     "company_name",
     "job_title",
     "position_level",

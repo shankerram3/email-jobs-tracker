@@ -268,7 +268,7 @@ def fetch_emails(service, query: str, max_results: int = 100):
     page_token = None
     page_size = min(settings.gmail_sync_page_size, max_results, 100)
     page_num = 0
-    empty_pages = 0
+    max_pages = int(getattr(settings, "gmail_sync_max_pages", 2000))
 
     logger.info(f"    Starting fetch with page_size={page_size}, max_results={max_results}")
 
@@ -278,10 +278,6 @@ def fetch_emails(service, query: str, max_results: int = 100):
         result = list_messages(service, query, max_results=page_size, page_token=page_token)
         messages = result.get("messages", [])
         logger.info(f"    Page {page_num}: Got {len(messages)} message IDs")
-        if not messages:
-            empty_pages += 1
-        else:
-            empty_pages = 0
 
         for idx, msg in enumerate(messages, 1):
             if idx % 10 == 0:
@@ -291,12 +287,12 @@ def fetch_emails(service, query: str, max_results: int = 100):
 
         logger.info(f"    Page {page_num} complete: {len(all_emails)} total messages so far")
         next_page_token = result.get("nextPageToken")
-        if next_page_token == page_token:
+        if next_page_token is not None and next_page_token == page_token:
             logger.warning("    Pagination stalled (repeated page token); stopping fetch.")
             break
         page_token = next_page_token
-        if empty_pages >= 3:
-            logger.warning("    Pagination returned empty pages repeatedly; stopping fetch.")
+        if page_num >= max_pages:
+            logger.warning("    Pagination hit max page limit; stopping fetch.")
             break
         if not page_token or len(all_emails) >= max_results:
             break
