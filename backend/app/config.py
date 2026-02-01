@@ -58,10 +58,12 @@ class Settings(BaseSettings):
     gmail_full_sync_ignore_last_synced: bool = False
 
     # Classification: max concurrent LLM calls (avoids rate limits)
-    classification_max_concurrency: int = 5
+    classification_max_concurrency: int = 15
     # Batch prompt: group N emails in one LLM call (reduces API calls; 0 = disabled)
     classification_batch_size: int = 10
     classification_use_batch_prompt: bool = True
+    # Minimum confidence for batch results; low-confidence critical emails reprocessed individually
+    classification_batch_confidence_threshold: float = 0.6
 
     class Config:
         env_file = ".env"

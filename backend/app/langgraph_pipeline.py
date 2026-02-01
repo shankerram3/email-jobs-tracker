@@ -409,10 +409,116 @@ def _parse_json_response(text: str) -> dict:
 # LangGraph Nodes
 # =============================================================================
 
+def classify_and_extract_node(state: EmailState) -> dict:
+    """
+    Combined classification and entity extraction in a single LLM call.
+    Reduces latency by ~50% (1 API call instead of 2).
+    """
+    categories_text = "\n".join(
+        f"{i+1}. {name} - {desc}"
+        for i, (name, desc) in enumerate(EMAIL_CATEGORIES.items())
+    )
+    guidance_text = _build_guidance_text()
+
+    subject = state.get("subject", "") or ""
+    sender = state.get("sender", "") or ""
+    body = state.get("body") or ""
+    body_sample = body[:1500]
+
+    # Pre-extract title candidates for context
+    title_candidates = get_job_title_candidates(subject=subject, body=body_sample)
+    title_candidates_text = "\n".join(f"- {c.value}" for c in title_candidates[:6]) or "- (none found)"
+
+    prompt = f"""You are an email classification and extraction system for job search emails.
+
+TASK 1 - CLASSIFICATION:
+Classify this email into EXACTLY ONE of these 14 classes:
+{categories_text}
+
+GUIDANCE:
+{guidance_text}
+
+PRIORITY RULES:
+- interview_assessment > job_application_confirmation (if mentions next steps/assessment)
+- job_rejection > talent_community (if clearly rejecting)
+- verification_security > application_followup (if contains OTP/code)
+- recruiter_outreach > job_alerts (if from a specific recruiter person)
+
+TASK 2 - ENTITY EXTRACTION:
+Extract company name, job title, and position level.
+For non-job emails (linkedin_*, verification_security, promotional_marketing, receipts_invoices), set all to null.
+
+Possible job title candidates (prefer these when matching):
+{title_candidates_text}
+
+EMAIL TO PROCESS:
+Subject: {subject}
+From: {sender}
+Body: {body_sample}
+
+Return ONLY valid JSON (no markdown):
+{{
+  "email_class": "<class_name from list above>",
+  "confidence": <0.0-1.0>,
+  "reasoning": "<brief 1-sentence explanation>",
+  "company_name": "<company name or null if unclear>",
+  "job_title": "<exact job title mentioned or null>",
+  "position_level": "<Junior|Mid|Senior|Staff|Principal|Lead|Manager or null>"
+}}"""
+
+    try:
+        response_text = _call_llm(prompt, max_tokens=350, force_json=True)
+        result = _parse_json_response(response_text)
+
+        email_class = (result.get("email_class") or "").strip()
+        if email_class not in EMAIL_CATEGORIES:
+            email_class = "promotional_marketing"
+
+        # Skip entity processing for non-job categories
+        if email_class in SKIP_EXTRACTION_CATEGORIES:
+            return {
+                "email_class": email_class,
+                "confidence": float(result.get("confidence", 0.5)),
+                "classification_reasoning": result.get("reasoning", ""),
+                "company_name": None,
+                "job_title": None,
+                "position_level": None,
+                "errors": state.get("errors", []),
+            }
+
+        # Post-validate job title
+        raw_job_title = result.get("job_title")
+        job_title = pick_best_job_title(subject=subject, body=body_sample, llm_suggested=raw_job_title)
+        job_title = clean_job_title(job_title)
+        if job_title and not is_plausible_job_title(job_title):
+            job_title = title_candidates[0].value if title_candidates else None
+
+        return {
+            "email_class": email_class,
+            "confidence": float(result.get("confidence", 0.5)),
+            "classification_reasoning": result.get("reasoning", ""),
+            "company_name": result.get("company_name"),
+            "job_title": job_title,
+            "position_level": result.get("position_level"),
+            "errors": state.get("errors", []),
+        }
+    except Exception as e:
+        return {
+            "email_class": "promotional_marketing",
+            "confidence": 0.0,
+            "classification_reasoning": f"Processing failed: {str(e)}",
+            "company_name": None,
+            "job_title": None,
+            "position_level": None,
+            "errors": state.get("errors", []) + [f"combined_error: {str(e)}"],
+        }
+
+
 def classify_email_node(state: EmailState) -> dict:
     """
     Classify email into one of 14 categories using GPT-4o-mini.
     Returns classification, confidence, and reasoning.
+    NOTE: This is the legacy separate classification node. Consider using classify_and_extract_node instead.
     """
     categories_text = "\n".join(
         f"{i+1}. {name} - {desc}"
@@ -641,26 +747,41 @@ def assign_stage_node(state: EmailState) -> dict:
 # Graph Construction
 # =============================================================================
 
-def create_email_processing_graph() -> Any:
+def create_email_processing_graph(use_combined_node: bool = True) -> Any:
     """
     Build the complete email processing workflow.
 
-    Flow: START -> classify -> extract_entities -> match_resume -> assign_stage -> END
+    Args:
+        use_combined_node: If True (default), uses single LLM call for classify+extract.
+                          If False, uses separate nodes (2 LLM calls).
+
+    Flow (combined): START -> classify_and_extract -> match_resume -> assign_stage -> END
+    Flow (separate): START -> classify -> extract_entities -> match_resume -> assign_stage -> END
     """
     graph = StateGraph(EmailState)
 
-    # Add nodes
-    graph.add_node("classify", classify_email_node)
-    graph.add_node("extract_entities", extract_entities_node)
-    graph.add_node("match_resume", match_resume_node)
-    graph.add_node("assign_stage", assign_stage_node)
+    if use_combined_node:
+        # Optimized: Single LLM call for classification + extraction (50% faster)
+        graph.add_node("classify_and_extract", classify_and_extract_node)
+        graph.add_node("match_resume", match_resume_node)
+        graph.add_node("assign_stage", assign_stage_node)
 
-    # Define edges (linear flow for now)
-    graph.add_edge(START, "classify")
-    graph.add_edge("classify", "extract_entities")
-    graph.add_edge("extract_entities", "match_resume")
-    graph.add_edge("match_resume", "assign_stage")
-    graph.add_edge("assign_stage", END)
+        graph.add_edge(START, "classify_and_extract")
+        graph.add_edge("classify_and_extract", "match_resume")
+        graph.add_edge("match_resume", "assign_stage")
+        graph.add_edge("assign_stage", END)
+    else:
+        # Legacy: Separate nodes (2 LLM calls)
+        graph.add_node("classify", classify_email_node)
+        graph.add_node("extract_entities", extract_entities_node)
+        graph.add_node("match_resume", match_resume_node)
+        graph.add_node("assign_stage", assign_stage_node)
+
+        graph.add_edge(START, "classify")
+        graph.add_edge("classify", "extract_entities")
+        graph.add_edge("extract_entities", "match_resume")
+        graph.add_edge("match_resume", "assign_stage")
+        graph.add_edge("assign_stage", END)
 
     # Compile the graph
     return graph.compile()
@@ -716,3 +837,177 @@ def get_category_display_name(category: str) -> str:
 def get_all_categories() -> dict:
     """Return all available categories with descriptions."""
     return EMAIL_CATEGORIES.copy()
+
+
+# =============================================================================
+# Batch Processing API
+# =============================================================================
+
+def _process_batch_llm(emails: List[dict]) -> List[dict]:
+    """
+    Single LLM call for batch classification+extraction.
+
+    Args:
+        emails: List of dicts with keys: email_id, subject, body, sender, received_date
+
+    Returns:
+        List of result dicts (one per email) or empty list on failure
+    """
+    if not emails:
+        return []
+
+    categories_text = "\n".join(
+        f"- {name}: {desc}" for name, desc in EMAIL_CATEGORIES.items()
+    )
+
+    email_parts = []
+    for i, e in enumerate(emails):
+        body_sample = (e.get("body") or "")[:1200]
+        email_parts.append(
+            f"--- Email {i+1} ---\n"
+            f"Subject: {e.get('subject', '')}\n"
+            f"From: {e.get('sender', '')}\n"
+            f"Body: {body_sample}"
+        )
+
+    combined = "\n\n".join(email_parts)
+
+    prompt = f"""You are an email classification and extraction system for job search emails.
+
+Categories (choose exactly one per email):
+{categories_text}
+
+PRIORITY RULES (when multiple categories could apply):
+- interview_assessment > job_application_confirmation (if mentions next steps/assessment/coding challenge)
+- job_rejection > talent_community (if clearly rejecting with "not moving forward", "unfortunately")
+- verification_security > application_followup (if contains OTP/verification code)
+- recruiter_outreach > job_alerts (if from a specific recruiter person, not automated)
+
+For each email, determine:
+1. email_class: One of the categories above (be precise - rejections and interviews are critical)
+2. confidence: 0.0-1.0 (use lower confidence if uncertain between categories)
+3. reasoning: Brief explanation of why this category
+4. company_name: The HIRING company (not LinkedIn, Indeed, Greenhouse, or other platforms)
+5. job_title: Exact job title mentioned (not "opportunity" or "role")
+6. position_level: Junior|Mid|Senior|Staff|Principal|Lead|Manager or null
+
+Return a JSON object with a "results" array containing exactly {len(emails)} items in order.
+
+Emails to process:
+{combined}
+
+Return ONLY valid JSON:
+{{"results": [...]}}"""
+
+    try:
+        # Calculate max tokens: ~350 per email + overhead
+        max_tokens = min(350 * len(emails) + 200, 4096)
+        response = _call_llm(prompt, max_tokens=max_tokens, force_json=True)
+        data = _parse_json_response(response)
+        arr = data.get("results", [])
+
+        if not isinstance(arr, list) or len(arr) != len(emails):
+            return []
+
+        return arr
+    except Exception:
+        return []
+
+
+def process_emails_batch(
+    emails: List[dict],
+    batch_size: int = 10,
+    confidence_threshold: float = 0.6,
+) -> List[EmailState]:
+    """
+    Process multiple emails efficiently using batch LLM calls.
+
+    For accuracy preservation:
+    - Low-confidence results (< threshold) are reprocessed individually
+    - Critical categories (rejection, offer) are validated more strictly
+    - Job titles are post-validated against extracted candidates
+
+    Args:
+        emails: List of dicts with keys: email_id, subject, body, sender, received_date
+        batch_size: Number of emails per LLM call (default 10)
+        confidence_threshold: Minimum confidence to accept batch result (default 0.6)
+
+    Returns:
+        List of EmailState results (one per input email)
+    """
+    if not emails:
+        return []
+
+    if batch_size <= 1:
+        # Fall back to individual processing
+        return [process_email(**e) for e in emails]
+
+    # Categories that are critical and should be reprocessed if low confidence
+    CRITICAL_CATEGORIES = {
+        "job_rejection",
+        "interview_assessment",
+        "job_application_confirmation",
+    }
+
+    results: List[EmailState] = []
+
+    for i in range(0, len(emails), batch_size):
+        batch = emails[i:i + batch_size]
+        batch_results = _process_batch_llm(batch)
+
+        if batch_results and len(batch_results) == len(batch):
+            # Process each result through remaining pipeline stages
+            for email_data, llm_result in zip(batch, batch_results):
+                # Validate email_class
+                email_class = (llm_result.get("email_class") or "").strip()
+                if email_class not in EMAIL_CATEGORIES:
+                    email_class = "promotional_marketing"
+
+                confidence = float(llm_result.get("confidence", 0.5))
+
+                # Accuracy safeguard: reprocess low-confidence critical emails individually
+                if confidence < confidence_threshold and email_class in CRITICAL_CATEGORIES:
+                    # Fall back to individual processing for better accuracy
+                    results.append(process_email(**email_data))
+                    continue
+
+                # Build initial state with LLM results
+                state: EmailState = {
+                    "email_id": email_data.get("email_id", ""),
+                    "subject": email_data.get("subject", ""),
+                    "body": email_data.get("body", ""),
+                    "sender": email_data.get("sender", ""),
+                    "received_date": email_data.get("received_date", ""),
+                    "email_class": email_class,
+                    "confidence": confidence,
+                    "classification_reasoning": llm_result.get("reasoning", ""),
+                    "company_name": llm_result.get("company_name"),
+                    "job_title": llm_result.get("job_title"),
+                    "position_level": llm_result.get("position_level"),
+                    "errors": [],
+                }
+
+                # Post-validate job title
+                if email_class not in SKIP_EXTRACTION_CATEGORIES:
+                    subject = email_data.get("subject", "") or ""
+                    body_sample = (email_data.get("body") or "")[:1500]
+                    title_candidates = get_job_title_candidates(subject=subject, body=body_sample)
+
+                    raw_job_title = state.get("job_title")
+                    job_title = pick_best_job_title(subject=subject, body=body_sample, llm_suggested=raw_job_title)
+                    job_title = clean_job_title(job_title)
+                    if job_title and not is_plausible_job_title(job_title):
+                        job_title = title_candidates[0].value if title_candidates else None
+                    state["job_title"] = job_title
+
+                # Run through remaining pipeline stages (no LLM calls)
+                state = {**state, **match_resume_node(state)}
+                state = {**state, **assign_stage_node(state)}
+
+                results.append(state)
+        else:
+            # Fallback to individual processing for this batch
+            for email_data in batch:
+                results.append(process_email(**email_data))
+
+    return results
