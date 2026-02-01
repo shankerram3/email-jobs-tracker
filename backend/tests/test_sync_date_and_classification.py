@@ -30,7 +30,7 @@ def test_full_sync_uses_after_date_in_queries(db):
     """run_sync_with_options with after_date set uses that date in full-sync Gmail queries."""
     captured_queries = []
 
-    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None, **kwargs):
         captured_queries.extend(queries)
         return []
 
@@ -51,7 +51,7 @@ def test_full_sync_uses_after_date_iso_format(db):
     """after_date YYYY-MM-DD is normalized to YYYY/MM/DD in queries."""
     captured_queries = []
 
-    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None, **kwargs):
         captured_queries.extend(queries)
         return []
 
@@ -70,7 +70,7 @@ def test_full_sync_uses_before_date_in_queries(db):
     """run_sync_with_options with before_date set includes before: in Gmail queries."""
     captured_queries = []
 
-    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+    def capture_fetch_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None, **kwargs):
         captured_queries.extend(queries)
         return []
 
@@ -101,7 +101,7 @@ def test_classification_creates_application_on_cache_miss(db):
         },
     }
 
-    def return_one_email_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None):
+    def return_one_email_parallel(service, queries, max_results_per_query=100, max_workers=7, on_progress=None, **kwargs):
         return [one_email]
 
     langgraph_result = {

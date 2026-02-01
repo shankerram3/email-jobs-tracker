@@ -572,6 +572,7 @@ def run_sync_with_options(
                     max_results_per_query=settings.gmail_full_sync_max_per_query,
                     max_workers=min(7, len(queries)),
                     on_progress=gmail_progress,
+                    service_factory=get_gmail_service,
                 )
                 logger.info(f"Parallel fetch complete: {len(all_emails)} unique emails")
             except Exception as e:

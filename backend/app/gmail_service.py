@@ -7,6 +7,7 @@ import time
 import re
 import logging
 import threading
+import ssl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from typing import Optional, List, Callable
@@ -199,6 +200,12 @@ def _with_backoff(fn, max_retries: int = 5):
                 time.sleep(2 ** attempt)
                 continue
             raise
+        except (ssl.SSLError, OSError) as e:
+            # Network/TLS flakiness can happen on some platforms; retry a few times.
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def get_profile_history_id(service) -> Optional[str]:
@@ -307,6 +314,7 @@ def fetch_emails_parallel(
     max_results_per_query: int = 100,
     max_workers: int = 7,
     on_progress: Optional[Callable[[int, str], None]] = None,
+    service_factory: Optional[Callable[[], object]] = None,
 ) -> List[dict]:
     """
     Fetch emails from multiple Gmail queries in parallel.
@@ -330,7 +338,10 @@ def fetch_emails_parallel(
     def fetch_one(query: str, query_idx: int):
         """Fetch emails for a single query."""
         try:
-            emails = fetch_emails(service, query, max_results=max_results_per_query)
+            # NOTE: googleapiclient service objects are not thread-safe.
+            # Use a per-thread service when running in parallel to avoid TLS/connection corruption.
+            local_service = service_factory() if service_factory else service
+            emails = fetch_emails(local_service, query, max_results=max_results_per_query)
             return (query_idx, emails, None)
         except Exception as e:
             return (query_idx, [], str(e))
