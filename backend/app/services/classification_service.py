@@ -12,10 +12,22 @@ from ..email_classifier import (
 )
 
 
-def get_cached_classification(db: Session, subject: str, sender: str, body: str) -> dict | None:
+def get_cached_classification(
+    db: Session,
+    subject: str,
+    sender: str,
+    body: str,
+    user_id: int | None,
+) -> dict | None:
     """Return structured payload if cache hit, else None."""
     h = content_hash(subject, sender, body)
-    row = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    if user_id is None:
+        return None
+    row = (
+        db.query(ClassificationCache)
+        .filter(ClassificationCache.content_hash == h, ClassificationCache.user_id == user_id)
+        .first()
+    )
     if not row:
         return None
     return {
@@ -35,13 +47,14 @@ def classify_and_cache(
     subject: str,
     sender: str,
     body: str,
+    user_id: int | None,
 ) -> dict:
     """
     Classify email: check cache first; on miss call LLM, persist to cache, normalize company.
     Returns structured payload (category, subcategory, company_name, job_title, salary_*, location, confidence).
     """
     h = content_hash(subject, sender, body)
-    cached = get_cached_classification(db, subject, sender, body)
+    cached = get_cached_classification(db, subject, sender, body, user_id)
     if cached is not None:
         cached = apply_category_overrides(cached, subject, body, sender)
         company = normalize_company_with_db(db, cached["company_name"])
@@ -62,43 +75,55 @@ def classify_and_cache(
         "location": result.get("location"),
         "confidence": result.get("confidence"),
     })
-    row = ClassificationCache(
-        content_hash=h,
-        category=result["category"],
-        subcategory=result.get("subcategory"),
-        company_name=result["company_name"],
-        job_title=result.get("job_title"),
-        salary_min=result.get("salary_min"),
-        salary_max=result.get("salary_max"),
-        location=result.get("location"),
-        confidence=result.get("confidence"),
-        raw_json=raw_json,
-    )
-    db.add(row)
-    try:
-        db.commit()
-    except IntegrityError:
-        # Race condition: another thread inserted the same content_hash
-        # Roll back and fetch the existing row
-        db.rollback()
-        existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
-        if existing:
-            # Update the existing row with our result
-            existing.category = result["category"]
-            existing.subcategory = result.get("subcategory")
-            existing.company_name = result["company_name"]
-            existing.job_title = result.get("job_title")
-            existing.salary_min = result.get("salary_min")
-            existing.salary_max = result.get("salary_max")
-            existing.location = result.get("location")
-            existing.confidence = result.get("confidence")
-            existing.raw_json = raw_json
+    if user_id is not None:
+        row = ClassificationCache(
+            user_id=user_id,
+            content_hash=h,
+            category=result["category"],
+            subcategory=result.get("subcategory"),
+            company_name=result["company_name"],
+            job_title=result.get("job_title"),
+            salary_min=result.get("salary_min"),
+            salary_max=result.get("salary_max"),
+            location=result.get("location"),
+            confidence=result.get("confidence"),
+            raw_json=raw_json,
+        )
+        db.add(row)
+        try:
             db.commit()
+        except IntegrityError:
+            # Race condition: another thread inserted the same content_hash
+            # Roll back and fetch the existing row
+            db.rollback()
+            existing = (
+                db.query(ClassificationCache)
+                .filter(ClassificationCache.content_hash == h, ClassificationCache.user_id == user_id)
+                .first()
+            )
+            if existing:
+                # Update the existing row with our result
+                existing.category = result["category"]
+                existing.subcategory = result.get("subcategory")
+                existing.company_name = result["company_name"]
+                existing.job_title = result.get("job_title")
+                existing.salary_min = result.get("salary_min")
+                existing.salary_max = result.get("salary_max")
+                existing.location = result.get("location")
+                existing.confidence = result.get("confidence")
+                existing.raw_json = raw_json
+                db.commit()
     return result
 
 
 def persist_llm_result_to_cache(
-    db: Session, subject: str, sender: str, body: str, result: dict, commit: bool = True
+    db: Session,
+    subject: str,
+    sender: str,
+    body: str,
+    result: dict,
+    user_id: int | None,
+    commit: bool = True,
 ) -> dict:
     """
     Persist an LLM classification result to cache and return result with company normalized.
@@ -119,7 +144,13 @@ def persist_llm_result_to_cache(
         "location": result.get("location"),
         "confidence": result.get("confidence"),
     })
-    existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    if user_id is None:
+        return result
+    existing = (
+        db.query(ClassificationCache)
+        .filter(ClassificationCache.content_hash == h, ClassificationCache.user_id == user_id)
+        .first()
+    )
     if existing:
         existing.category = result["category"]
         existing.subcategory = result.get("subcategory")
@@ -132,6 +163,7 @@ def persist_llm_result_to_cache(
         existing.raw_json = raw_json
     else:
         row = ClassificationCache(
+            user_id=user_id,
             content_hash=h,
             category=result["category"],
             subcategory=result.get("subcategory"),
@@ -152,7 +184,11 @@ def persist_llm_result_to_cache(
         # Race condition: another thread inserted between our check and flush
         db.rollback()
         # Retry: fetch and update the now-existing row
-        existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+        existing = (
+            db.query(ClassificationCache)
+            .filter(ClassificationCache.content_hash == h, ClassificationCache.user_id == user_id)
+            .first()
+        )
         if existing:
             existing.category = result["category"]
             existing.subcategory = result.get("subcategory")

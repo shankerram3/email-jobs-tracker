@@ -169,6 +169,7 @@ def run_reprocess_applications(
                     app.email_from or "",
                     app.email_body or "",
                     r,
+                    user_id,
                     commit=False,
                 )
             except Exception:
@@ -211,4 +212,3 @@ def run_reprocess_applications(
         "skipped": skipped,
         "errors": errors,
     }
-

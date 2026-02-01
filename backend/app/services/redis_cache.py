@@ -52,7 +52,7 @@ def get_redis_client():
         return None
 
 
-def get_cached_classification_redis(content_hash: str) -> Optional[dict]:
+def get_cached_classification_redis(content_hash: str, user_id: Optional[int]) -> Optional[dict]:
     """
     Try to get classification from Redis cache.
 
@@ -62,12 +62,14 @@ def get_cached_classification_redis(content_hash: str) -> Optional[dict]:
     Returns:
         Cached classification dict or None on miss/error
     """
+    if user_id is None:
+        return None
     client = get_redis_client()
     if not client:
         return None
 
     try:
-        key = f"class:{content_hash}"
+        key = f"class:{user_id}:{content_hash}"
         data = client.get(key)
         if data:
             return json.loads(data)
@@ -79,6 +81,7 @@ def get_cached_classification_redis(content_hash: str) -> Optional[dict]:
 
 def set_cached_classification_redis(
     content_hash: str,
+    user_id: Optional[int],
     data: dict,
     ttl_hours: int = 24 * 7,  # 7 days default
 ) -> bool:
@@ -93,12 +96,14 @@ def set_cached_classification_redis(
     Returns:
         True if cached successfully, False otherwise
     """
+    if user_id is None:
+        return False
     client = get_redis_client()
     if not client:
         return False
 
     try:
-        key = f"class:{content_hash}"
+        key = f"class:{user_id}:{content_hash}"
         client.setex(key, ttl_hours * 3600, json.dumps(data))
         return True
     except Exception as e:
@@ -106,7 +111,7 @@ def set_cached_classification_redis(
         return False
 
 
-def invalidate_cached_classification_redis(content_hash: str) -> bool:
+def invalidate_cached_classification_redis(content_hash: str, user_id: Optional[int]) -> bool:
     """
     Remove classification from Redis cache.
 
@@ -116,12 +121,14 @@ def invalidate_cached_classification_redis(content_hash: str) -> bool:
     Returns:
         True if deleted (or didn't exist), False on error
     """
+    if user_id is None:
+        return True
     client = get_redis_client()
     if not client:
         return True  # No cache to invalidate
 
     try:
-        key = f"class:{content_hash}"
+        key = f"class:{user_id}:{content_hash}"
         client.delete(key)
         return True
     except Exception as e:

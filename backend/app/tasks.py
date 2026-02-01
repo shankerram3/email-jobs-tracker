@@ -17,7 +17,13 @@ from .services.reprocess_service import ReprocessOptions, run_reprocess_applicat
 
 
 @shared_task(bind=True, name="app.tasks.run_email_sync")
-def run_email_sync(self, mode: str = "incremental", after_date: Optional[str] = None, before_date: Optional[str] = None):
+def run_email_sync(
+    self,
+    mode: str = "incremental",
+    after_date: Optional[str] = None,
+    before_date: Optional[str] = None,
+    user_id: Optional[int] = None,
+):
     """
     Run email sync. mode: incremental | full.
     after_date: optional YYYY-MM-DD or YYYY/MM/DD for full sync "from" date.
@@ -26,17 +32,27 @@ def run_email_sync(self, mode: str = "incremental", after_date: Optional[str] = 
     """
     db = SessionLocal()
     try:
-        set_sync_state_syncing(db)
+        if user_id is None:
+            raise ValueError("user_id is required for multi-user sync tasks")
+        set_sync_state_syncing(db, user_id=user_id)
         progress_callback = None  # Celery task can't push to SSE; progress stored in sync_state
         result = run_sync_with_options(
-            db, mode=mode, on_progress=progress_callback, after_date=after_date, before_date=before_date
+            db,
+            mode=mode,
+            on_progress=progress_callback,
+            after_date=after_date,
+            before_date=before_date,
+            user_id=user_id,
         )
         if result.get("error"):
-            set_sync_state_error(db, result["error"])
+            set_sync_state_error(db, result["error"], user_id=user_id)
         else:
-            set_sync_state_idle(db, result)
+            set_sync_state_idle(db, result, user_id=user_id)
     except Exception as e:
-        set_sync_state_error(db, str(e))
+        try:
+            set_sync_state_error(db, str(e), user_id=user_id)
+        except Exception:
+            pass
         raise
     finally:
         db.close()

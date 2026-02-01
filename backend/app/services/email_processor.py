@@ -275,22 +275,30 @@ def _sanitize_langgraph_cache_state(state: dict) -> dict:
     return safe
 
 
-def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: str) -> Optional[dict]:
+def _get_cached_langgraph_state(
+    db: Session, subject: str, sender: str, body: str, user_id: Optional[int]
+) -> Optional[dict]:
     """
     Return cached LangGraph state if present and valid; otherwise None.
     Checks Redis L1 cache first, then falls back to database.
     """
+    if user_id is None:
+        return None
     h = content_hash(subject, sender, body)
 
     # L1: Try Redis cache first (sub-millisecond lookup)
-    redis_cached = get_cached_classification_redis(h)
+    redis_cached = get_cached_classification_redis(h, user_id)
     if redis_cached:
         email_class = (redis_cached.get("email_class") or "").strip()
         if email_class in EMAIL_CATEGORIES:
             return _sanitize_langgraph_cache_state(redis_cached)
 
     # L2: Fall back to database
-    row = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    row = (
+        db.query(ClassificationCache)
+        .filter(ClassificationCache.content_hash == h, ClassificationCache.user_id == user_id)
+        .first()
+    )
     if not row or not row.raw_json:
         return None
     try:
@@ -303,18 +311,26 @@ def _get_cached_langgraph_state(db: Session, subject: str, sender: str, body: st
 
     # Populate Redis cache for next time
     sanitized = _sanitize_langgraph_cache_state(data)
-    set_cached_classification_redis(h, sanitized)
+    set_cached_classification_redis(h, user_id, sanitized)
 
     return sanitized
 
 
 def _persist_langgraph_state_to_cache(
-    db: Session, subject: str, sender: str, body: str, state: dict, commit: bool = False
+    db: Session,
+    subject: str,
+    sender: str,
+    body: str,
+    state: dict,
+    user_id: Optional[int],
+    commit: bool = False,
 ) -> None:
     """
     Upsert LangGraph state into classification cache (Redis + DB).
     Writes to both Redis L1 and database L2 for consistency.
     """
+    if user_id is None:
+        return
     h = content_hash(subject, sender, body)
     sanitized = _sanitize_langgraph_cache_state(state)
     email_class = (sanitized.get("email_class") or "").strip()
@@ -322,11 +338,15 @@ def _persist_langgraph_state_to_cache(
         email_class = "promotional_marketing"
 
     # Write to Redis L1 cache
-    set_cached_classification_redis(h, sanitized)
+    set_cached_classification_redis(h, user_id, sanitized)
 
     # Write to database L2 cache
     raw_json = json.dumps(sanitized)
-    existing = db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).first()
+    existing = (
+        db.query(ClassificationCache)
+        .filter(ClassificationCache.content_hash == h, ClassificationCache.user_id == user_id)
+        .first()
+    )
     if existing:
         existing.category = email_class
         existing.company_name = sanitized.get("company_name")
@@ -336,6 +356,7 @@ def _persist_langgraph_state_to_cache(
     else:
         db.add(
             ClassificationCache(
+                user_id=user_id,
                 content_hash=h,
                 category=email_class,
                 subcategory=None,
@@ -625,7 +646,7 @@ def run_sync_with_options(
             progress(i + 1, total, "Classifying…")
             continue
 
-        cached = _get_cached_langgraph_state(db, subject, sender, body)
+        cached = _get_cached_langgraph_state(db, subject, sender, body, user_id)
         if cached is not None:
             received = _parse_received(received_iso)
             email_class = cached.get("email_class")
@@ -752,7 +773,9 @@ def run_sync_with_options(
                 # Persist cache + application creation in a savepoint so IntegrityError doesn't nuke the whole batch.
                 try:
                     with db.begin_nested():
-                        _persist_langgraph_state_to_cache(db, subject, sender, body, structured or {}, commit=False)
+                        _persist_langgraph_state_to_cache(
+                            db, subject, sender, body, structured or {}, user_id, commit=False
+                        )
 
                         received = _parse_received(received_iso)
                         email_class = (structured or {}).get("email_class")

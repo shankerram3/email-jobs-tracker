@@ -169,7 +169,8 @@ class ClassificationCache(Base):
     __tablename__ = "classification_cache"
 
     id = Column(Integer, primary_key=True, index=True)
-    content_hash = Column(String(64), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    content_hash = Column(String(64), index=True, nullable=False)
     category = Column(String, nullable=False)
     subcategory = Column(String, nullable=True)
     company_name = Column(String, nullable=True)
@@ -201,3 +202,4 @@ Index("ix_applications_category_received_date", Application.category, Applicatio
 Index("ix_applications_status_received_date", Application.status, Application.received_date)
 Index("ix_applications_received_date", Application.received_date)
 Index("ix_applications_user_gmail", Application.user_id, Application.gmail_message_id, unique=True)
+Index("ix_classification_cache_user_hash", ClassificationCache.user_id, ClassificationCache.content_hash, unique=True)

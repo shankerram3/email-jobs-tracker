@@ -62,19 +62,20 @@ def test_normalize_company_name():
 
 
 def test_get_cached_classification_miss(db):
-    assert get_cached_classification(db, "Subj", "from@x.com", "body") is None
+    assert get_cached_classification(db, "Subj", "from@x.com", "body", 1) is None
 
 
 def test_cache_hit_after_insert(db):
     h = content_hash("S", "F", "B")
     db.add(ClassificationCache(
+        user_id=1,
         content_hash=h,
         category="REJECTION",
         company_name="Acme",
         raw_json="{}",
     ))
     db.commit()
-    cached = get_cached_classification(db, "S", "F", "B")
+    cached = get_cached_classification(db, "S", "F", "B", 1)
     assert cached is not None
     assert cached["category"] == "REJECTION"
     assert cached["company_name"] == "Acme"

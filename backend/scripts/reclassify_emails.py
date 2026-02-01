@@ -162,13 +162,16 @@ def reclassify(
 
             # Remove old cache row so we can re-insert with new classification
             h = content_hash(subject, sender, body)
-            db.query(ClassificationCache).filter(ClassificationCache.content_hash == h).delete(synchronize_session=False)
+            db.query(ClassificationCache).filter(
+                ClassificationCache.content_hash == h,
+                ClassificationCache.user_id == app.user_id,
+            ).delete(synchronize_session=False)
 
             _apply_result_to_application(app, result, company_normalized)
             updated += 1
 
             # Persist new result to cache (same content_hash, new category/etc.)
-            persist_llm_result_to_cache(db, subject, sender, body, result, commit=False)
+            persist_llm_result_to_cache(db, subject, sender, body, result, app.user_id, commit=False)
 
         if not dry_run:
             db.commit()
