@@ -593,11 +593,13 @@ function TrackerApp({ logout, user, token }) {
             {error.toLowerCase().includes('gmail') && error.toLowerCase().includes('auth') && (
               <div style={{ marginTop: '0.5rem' }}>
                 <a
-                  href={
-                    token
-                      ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(token)}&redirect_url=${encodeURIComponent(window.location.origin + (window.location.pathname || '/'))}`
+                  href={(() => {
+                    const t = token || (typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
+                    const redirect = encodeURIComponent(window.location.origin + (window.location.pathname || '/'))
+                    return t
+                      ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(t)}&redirect_url=${redirect}`
                       : `${API_URL}/api/gmail/auth`
-                  }
+                  })()}
                   className="link-btn"
                   style={{ color: 'var(--accent)' }}
                 >
@@ -679,6 +681,16 @@ function TrackerApp({ logout, user, token }) {
               <button className="sync-btn" onClick={syncEmails} disabled={syncing}>
                 {syncing ? 'Syncing…' : 'Sync Emails'}
               </button>
+              {(() => {
+                const t = token || (typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
+                const redirect = encodeURIComponent(window.location.origin + (window.location.pathname || '/'))
+                const authUrl = t ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(t)}&redirect_url=${redirect}` : `${API_URL}/api/gmail/auth`
+                return (
+                  <a href={authUrl} className="link-btn" style={{ fontSize: '0.9rem', color: 'var(--accent)' }}>
+                    Connect Gmail
+                  </a>
+                )
+              })()}
             </div>
             {stats && (
         <section className="dashboard-section" aria-label="Overview">

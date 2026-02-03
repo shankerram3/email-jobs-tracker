@@ -22,6 +22,7 @@ Track job applications by syncing Gmail (history-based incremental sync), classi
 - [Testing](#testing)
 - [Deployment notes](#deployment-notes)
 - [Troubleshooting](#troubleshooting)
+- [Runbook: Reset all user data](#runbook-reset-all-user-data)
 - [Migration and security](#migration-and-security)
 - [License](#license)
 
@@ -505,12 +506,70 @@ pytest
 - **ECONNREFUSED from frontend**: ensure backend is running on port 8000 and frontend on 5173; Vite proxies to `127.0.0.1` by design.
 - **Reprocess stuck in “queued”**: confirm Redis is running and a Celery worker is started in `backend/` with the same `.env`.
 - **Redis unavailable on Railway**: if logs show `Error 111 connecting to localhost:6379`, your `REDIS_URL` is pointing at localhost. Use the Railway Redis service URL.
-- **Reset all users’ data (keep users)**: run the one-time wipe script (destructive; keeps `users` intact):
-  - From repo root: `python backend/scripts/reset_all_user_data.py --yes-really`
-  - From `backend/`: `./.venv/bin/python scripts/reset_all_user_data.py --yes-really`
-  - To force everyone to re-authorize Gmail, also delete token files in `TOKEN_DIR`:
-    - Local/dev default: `backend/gmail_tokens/`
-    - Containers: `/data/gmail_tokens/`
+- **Reset all users’ data (keep users)**: see [Runbook: Reset all user data](#runbook-reset-all-user-data) below.
+
+### Runbook: Reset all user data
+
+Destructive one-time script that wipes application-related data for **all users** (keeps `users` intact). Use to eliminate previously-ingested cross-account data.
+
+**Tables deleted:** `applications`, `email_logs`, `sync_state`, `reprocess_state`, `oauth_state`, `classification_cache`, `sync_metadata`  
+**Tables preserved:** `users`
+
+#### Local / dev deployment
+
+1. **Run the script** (requires `--yes-really`):
+
+   From repo root:
+   ```bash
+   python backend/scripts/reset_all_user_data.py --yes-really
+   ```
+
+   Or from `backend/`:
+   ```bash
+   ./.venv/bin/python scripts/reset_all_user_data.py --yes-really
+   ```
+
+2. **Token cleanup (optional)** — to force users to re-authorize Gmail:
+
+   **Option A** — use the script's built-in flag:
+   ```bash
+   python backend/scripts/reset_all_user_data.py --yes-really --delete-tokens
+   ```
+
+   **Option B** — delete token files manually:
+   - **Location:** `backend/gmail_tokens/` (default when `TOKEN_DIR` is unset or `gmail_tokens`)
+   - **Command:** `rm -f backend/gmail_tokens/token_*.pickle`
+
+#### Container (Docker Compose) deployment
+
+1. **Run the script** inside the app container:
+
+   ```bash
+   docker compose exec app python scripts/reset_all_user_data.py --yes-really
+   ```
+
+2. **Token cleanup (optional)** — to force users to re-authorize Gmail:
+
+   **Option A** — use the script's built-in flag:
+   ```bash
+   docker compose exec app python scripts/reset_all_user_data.py --yes-really --delete-tokens
+   ```
+
+   **Option B** — delete token files manually inside the container:
+   - **Location:** `/data/gmail_tokens/` (when `TOKEN_DIR=/data/gmail_tokens`, as in `docker-compose.yml`)
+   - **Command:** `docker compose exec app rm -f /data/gmail_tokens/token_*.pickle`
+
+#### Railway / other container deployments
+
+Use the same commands as Docker Compose, but exec into your running app container (e.g. `railway run ...` or your platform's exec equivalent). Token directory is whatever `TOKEN_DIR` is set to (e.g. `/data/gmail_tokens` when using a mounted volume).
+
+#### Verification
+
+After reset:
+
+- `GET /api/stats` returns zeroed counts
+- `GET /api/applications` returns empty
+- Sync requires Gmail OAuth again if token files were removed
 
 ---
 
