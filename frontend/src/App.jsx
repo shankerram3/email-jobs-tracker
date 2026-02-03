@@ -316,7 +316,9 @@ function TrackerApp({ logout, user, token }) {
       : null
     const meta = hasTotal
       ? `${percent}% • ${progress.processed} of ${progress.total}`
-      : 'Estimating inbox size…'
+      : progress.processed > 0
+        ? `Fetched ${progress.processed} emails so far`
+        : 'Estimating inbox size…'
     let hint = 'Working through your latest updates.'
     if (baseMessage.toLowerCase().includes('connecting')) {
       hint = 'Warming up the connection and preparing the pipeline.'
@@ -619,9 +621,11 @@ function TrackerApp({ logout, user, token }) {
         <div className="sync-progress">
           <div className="sync-progress-header">
             <span className="sync-progress-message">{details.headline}</span>
-            {syncProgress.total > 0 && (
+            {(syncProgress.total > 0 || syncProgress.processed > 0) && (
               <span className="sync-progress-count">
-                {syncProgress.processed} / {syncProgress.total}
+                {syncProgress.total > 0
+                  ? `${syncProgress.processed} / ${syncProgress.total}`
+                  : `${syncProgress.processed} fetched`}
               </span>
             )}
           </div>
