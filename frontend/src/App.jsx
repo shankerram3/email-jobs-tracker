@@ -592,19 +592,21 @@ function TrackerApp({ logout, user, token }) {
             {error}
             {error.toLowerCase().includes('gmail') && error.toLowerCase().includes('auth') && (
               <div style={{ marginTop: '0.5rem' }}>
-                <a
-                  href={(() => {
-                    const t = token || (typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
+                <button
+                  type="button"
+                  className="link-btn"
+                  style={{ color: 'var(--accent)', background: 'none', border: 'none', padding: 0, cursor: 'pointer', font: 'inherit', textDecoration: 'underline' }}
+                  onClick={() => {
+                    const t = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null
                     const redirect = encodeURIComponent(window.location.origin + (window.location.pathname || '/'))
-                    return t
+                    const url = t
                       ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(t)}&redirect_url=${redirect}`
                       : `${API_URL}/api/gmail/auth`
-                  })()}
-                  className="link-btn"
-                  style={{ color: 'var(--accent)' }}
+                    window.location.href = url
+                  }}
                 >
                   Authorize Gmail in browser →
-                </a>
+                </button>
               </div>
             )}
           </div>
@@ -681,16 +683,21 @@ function TrackerApp({ logout, user, token }) {
               <button className="sync-btn" onClick={syncEmails} disabled={syncing}>
                 {syncing ? 'Syncing…' : 'Sync Emails'}
               </button>
-              {(() => {
-                const t = token || (typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
-                const redirect = encodeURIComponent(window.location.origin + (window.location.pathname || '/'))
-                const authUrl = t ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(t)}&redirect_url=${redirect}` : `${API_URL}/api/gmail/auth`
-                return (
-                  <a href={authUrl} className="link-btn" style={{ fontSize: '0.9rem', color: 'var(--accent)' }}>
-                    Connect Gmail
-                  </a>
-                )
-              })()}
+              <button
+                type="button"
+                className="link-btn"
+                style={{ fontSize: '0.9rem', color: 'var(--accent)', background: 'none', border: 'none', padding: 0, cursor: 'pointer', font: 'inherit', textDecoration: 'underline' }}
+                onClick={() => {
+                  const t = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null
+                  const redirect = encodeURIComponent(window.location.origin + (window.location.pathname || '/'))
+                  const url = t
+                    ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(t)}&redirect_url=${redirect}`
+                    : `${API_URL}/api/gmail/auth`
+                  window.location.href = url
+                }}
+              >
+                Connect Gmail
+              </button>
             </div>
             {stats && (
         <section className="dashboard-section" aria-label="Overview">
