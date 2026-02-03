@@ -292,7 +292,7 @@ function ActionItem({ item }) {
   )
 }
 
-function TrackerApp({ logout, user }) {
+function TrackerApp({ logout, user, token }) {
   const [view, setView] = useState('dashboard')
   const [stats, setStats] = useState(null)
   const [showProfile, setShowProfile] = useState(false)
@@ -592,7 +592,15 @@ function TrackerApp({ logout, user }) {
             {error}
             {error.toLowerCase().includes('gmail') && error.toLowerCase().includes('auth') && (
               <div style={{ marginTop: '0.5rem' }}>
-                <a href={`${API_URL}/api/gmail/auth`} className="link-btn" style={{ color: 'var(--accent)' }}>
+                <a
+                  href={
+                    token
+                      ? `${API_URL}/api/gmail/auth?token=${encodeURIComponent(token)}&redirect_url=${encodeURIComponent(window.location.origin + (window.location.pathname || '/'))}`
+                      : `${API_URL}/api/gmail/auth`
+                  }
+                  className="link-btn"
+                  style={{ color: 'var(--accent)' }}
+                >
                   Authorize Gmail in browser →
                 </a>
               </div>
@@ -1253,7 +1261,7 @@ function App() {
       </div>
     )
   }
-  return <TrackerApp logout={logout} user={user} />
+  return <TrackerApp logout={logout} user={user} token={token} />
 }
 
 export default App

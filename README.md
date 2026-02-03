@@ -505,6 +505,12 @@ pytest
 - **ECONNREFUSED from frontend**: ensure backend is running on port 8000 and frontend on 5173; Vite proxies to `127.0.0.1` by design.
 - **Reprocess stuck in “queued”**: confirm Redis is running and a Celery worker is started in `backend/` with the same `.env`.
 - **Redis unavailable on Railway**: if logs show `Error 111 connecting to localhost:6379`, your `REDIS_URL` is pointing at localhost. Use the Railway Redis service URL.
+- **Reset all users’ data (keep users)**: run the one-time wipe script (destructive; keeps `users` intact):
+  - From repo root: `python backend/scripts/reset_all_user_data.py --yes-really`
+  - From `backend/`: `./.venv/bin/python scripts/reset_all_user_data.py --yes-really`
+  - To force everyone to re-authorize Gmail, also delete token files in `TOKEN_DIR`:
+    - Local/dev default: `backend/gmail_tokens/`
+    - Containers: `/data/gmail_tokens/`
 
 ---
 
